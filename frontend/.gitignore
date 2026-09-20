@@ -6,3 +6,4 @@ build/
 *.log
 .env.local
 .env*.local
+*.tsbuildinfo
