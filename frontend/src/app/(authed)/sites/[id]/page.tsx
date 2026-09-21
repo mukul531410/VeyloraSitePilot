@@ -2,8 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { api, ApiError } from '@/lib/api';
-import { Site } from '@/lib/types';
+  import { api, ApiError } from '@/lib/api';
+  import { Site, SiteConnection } from '@/lib/types';
 
 export default function SiteDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter();
@@ -13,6 +13,9 @@ export default function SiteDetailPage({ params }: { params: Promise<{ id: strin
   const [id, setId] = useState<string>('');
   const [editing, setEditing] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
+  const [connection, setConnection] = useState<SiteConnection | null>(null);
+  const [connectionLoading, setConnectionLoading] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [editData, setEditData] = useState({
     name: '',
     url: '',
@@ -78,6 +81,22 @@ export default function SiteDetailPage({ params }: { params: Promise<{ id: strin
       setError((err as ApiError).message || 'Failed to load site');
     } finally {
       setLoading(false);
+      void fetchConnection();
+    }
+  };
+
+  const fetchConnection = async () => {
+    if (!id) return;
+    setConnectionLoading(true);
+    setConnectionError(null);
+    try {
+      const response = await api.listConnections(id);
+      const connections = response.data as unknown as SiteConnection[];
+      setConnection(connections.length > 0 ? connections[0] : null);
+    } catch (err) {
+      setConnectionError((err as ApiError).message || 'Failed to load connection');
+    } finally {
+      setConnectionLoading(false);
     }
   };
 
@@ -105,6 +124,7 @@ export default function SiteDetailPage({ params }: { params: Promise<{ id: strin
         notes: editData.notes,
       });
       await fetchSite();
+      void fetchConnection();
       setEditing(false);
     } catch (err) {
       setError((err as ApiError).message || 'Failed to update site');
@@ -299,6 +319,78 @@ export default function SiteDetailPage({ params }: { params: Promise<{ id: strin
           <p>Created: {new Date(site.created_at).toLocaleString()}</p>
           <p>Updated: {new Date(site.updated_at).toLocaleString()}</p>
         </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow p-6">
+        <h2 className="text-xl font-semibold text-gray-900 mb-4">Connection</h2>
+        {connectionLoading ? (
+          <div className="text-center py-4">Loading connection...</div>
+        ) : connectionError ? (
+          <div className="text-red-600">{connectionError}</div>
+        ) : connection ? (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-500">Status</label>
+                <p className="mt-1">{connection.status}</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-500">Connector Version</label>
+                <p className="mt-1">{connection.connector_version || '—'}</p>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-500">Connected</label>
+              <p className="mt-1">{connection.connected_at ? new Date(connection.connected_at).toLocaleString() : '—'}</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-500">Last Seen</label>
+              <p className="mt-1">{connection.last_seen_at ? new Date(connection.last_seen_at).toLocaleString() : '—'}</p>
+            </div>
+            {connection.status !== 'revoked' && (
+              <button
+                onClick={async () => {
+                  if (!confirm('Revoke this connection? The connector will no longer be able to communicate with SitePilot.')) return;
+                  try {
+                    await api.revokeConnection(id, connection.id);
+                    setConnection(null);
+                    await fetchSite();
+                  } catch (err) {
+                    setConnectionError((err as ApiError).message || 'Failed to revoke connection');
+                  }
+                }}
+                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+              >
+                Revoke Connection
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-gray-600">No connection established.</p>
+            <button
+              onClick={async () => {
+                setConnectionLoading(true);
+                setConnectionError(null);
+                try {
+                  const res = await api.createConnection(id);
+                  setConnection(res.data);
+                  await fetchSite();
+                } catch (err) {
+                  setConnectionError((err as ApiError).message || 'Failed to create connection');
+                } finally {
+                  setConnectionLoading(false);
+                }
+              }}
+              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            >
+              Create Connection Intent
+            </button>
+            <div className="mt-2 text-sm text-gray-600">
+              A connection intent will be generated. Install the WordPress connector and provide the intent code to establish the connection.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

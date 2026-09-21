@@ -55,6 +55,13 @@ GET /sites/{site}
 PATCH /sites/{site}
 DELETE /sites/{site}
 
+### Site Connections
+GET /sites/{site}/connections
+POST /sites/{site}/connections
+GET /sites/{site}/connections/{connection}
+DELETE /sites/{site}/connections/{connection}
+
+### Site Monitoring
 GET /sites/{site}/health
 GET /sites/{site}/inventory
 GET /sites/{site}/metrics

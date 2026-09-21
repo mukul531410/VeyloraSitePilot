@@ -1,3 +1,5 @@
+import { SiteConnection } from './types';
+
 export class ApiError extends Error {
   public statusCode: number;
   public code: string;
@@ -129,4 +131,19 @@ export const api = {
 
   deleteSite: (id: string): Promise<ApiResponse<null>> =>
     request(`/sites/${id}`, { method: 'DELETE' }),
+
+  createConnection: (siteId: string, data?: { connector_version?: string }): Promise<ApiResponse<SiteConnection>> =>
+    request(`/sites/${siteId}/connections`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    }),
+
+  getConnection: (siteId: string, connectionId: string): Promise<ApiResponse<SiteConnection>> =>
+    request(`/sites/${siteId}/connections/${connectionId}`, { method: 'GET' }),
+
+  revokeConnection: (siteId: string, connectionId: string): Promise<ApiResponse<null>> =>
+    request(`/sites/${siteId}/connections/${connectionId}`, { method: 'DELETE' }),
+
+  listConnections: (siteId: string): Promise<ApiResponse<SiteConnection[]>> =>
+    request(`/sites/${siteId}/connections`, { method: 'GET' }),
 };

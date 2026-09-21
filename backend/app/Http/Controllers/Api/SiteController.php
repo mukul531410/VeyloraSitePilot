@@ -16,6 +16,7 @@ class SiteController extends BaseController
 
         $sites = Site::whereIn('organization_id', $organizationIds)
             ->latest()
+            ->with('latestConnection')
             ->paginate(25);
 
         return $this->successResponse(
@@ -57,6 +58,8 @@ class SiteController extends BaseController
         if (! $this->userCanAccessSite($request, $site)) {
             return $this->errorResponse('Unauthorized', 'unauthorized', 403);
         }
+
+        $site->load('latestConnection');
 
         return $this->successResponse(
             $this->transformSite($site)

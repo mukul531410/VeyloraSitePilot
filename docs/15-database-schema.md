@@ -34,7 +34,7 @@ role_id, permission_id
 id, organization_id, name, url, environment, status, business_criticality, timezone, notes, created_at, updated_at
 
 ### site_connections
-id, site_id, status, connector_version, credential_ciphertext, credential_version, connected_at, last_seen_at, revoked_at, created_at, updated_at
+id, site_id, status, connector_version, credential_ciphertext, credential_version, connector_token_hash, connection_intent, intent_expires_at, connected_at, last_seen_at, revoked_at, created_at, updated_at
 
 ### connector_capabilities
 id, site_connection_id, capability_key, enabled, discovered_at, updated_at
