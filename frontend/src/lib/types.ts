@@ -105,3 +105,60 @@ export interface ApiError {
   };
   request_id: string;
 }
+
+export type HealthState = 'healthy' | 'attention' | 'degraded' | 'critical' | 'unknown';
+export type IncidentStatus = 'detected' | 'acknowledged' | 'investigating' | 'resolved';
+export type IncidentSeverity = 'critical' | 'high' | 'medium' | 'low';
+export type IncidentType = 'heartbeat_loss' | 'site_unreachable' | 'ssl_expiring' | 'critical_findings' | 'health_degraded';
+export type CheckType = 'reachability' | 'http_response' | 'ssl' | 'heartbeat' | 'uptime' | 'wordpress_state' | 'critical_findings';
+export type CheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface HealthCheckRecord {
+  id: string;
+  site_id: string;
+  check_type: CheckType;
+  status: CheckStatus;
+  value_json: Record<string, unknown> | null;
+  checked_at: string;
+  created_at: string;
+}
+
+export interface SiteMetricRecord {
+  site_id: string;
+  metric_type: string;
+  value: number | null;
+  unit: string | null;
+  observed_at: string;
+}
+
+export interface Incident {
+  id: string;
+  site_id: string;
+  type: IncidentType;
+  severity: IncidentSeverity;
+  status: IncidentStatus;
+  title: string;
+  description: string | null;
+  first_detected_at: string;
+  last_detected_at: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SiteHealth {
+  site_id: string;
+  health_state: HealthState;
+  last_checked_at: string | null;
+  open_incidents: Incident[];
+  checks: HealthCheckRecord[];
+}
+
+export interface SiteMetricsResponse {
+  [metricType: string]: Array<{
+    metric_type: string;
+    value: number | null;
+    unit: string | null;
+    observed_at: string;
+  }>;
+}

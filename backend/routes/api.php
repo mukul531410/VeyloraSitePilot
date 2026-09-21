@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\SiteController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ConnectorController;
 use App\Http\Controllers\Api\SiteConnectionController;
+use App\Http\Controllers\Api\SiteMonitoringController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function (): void {
@@ -40,11 +41,16 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/sites/{site}/connections', [SiteConnectionController::class, 'store']);
         Route::get('/sites/{site}/connections/{connection}', [SiteConnectionController::class, 'show']);
         Route::delete('/sites/{site}/connections/{connection}', [SiteConnectionController::class, 'destroy']);
+
+        Route::get('/sites/{site}/health', [SiteMonitoringController::class, 'health']);
+        Route::get('/sites/{site}/metrics', [SiteMonitoringController::class, 'metrics']);
+        Route::get('/sites/{site}/incidents', [SiteMonitoringController::class, 'incidents']);
     });
 
     Route::middleware('connector')->group(function (): void {
         Route::post('/connector/heartbeat', [ConnectorController::class, 'heartbeat']);
         Route::get('/connector/capabilities', [ConnectorController::class, 'capabilities']);
+        Route::post('/connector/telemetry', [ConnectorController::class, 'telemetry']);
     });
 
     Route::post('/connector/register', [ConnectorController::class, 'register']);

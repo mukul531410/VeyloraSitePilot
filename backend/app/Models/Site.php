@@ -43,4 +43,32 @@ class Site extends Model
     {
         return $this->hasOne(SiteConnection::class)->ofMany('created_at', 'max');
     }
+
+    public function healthChecks(): HasMany
+    {
+        return $this->hasMany(HealthCheck::class);
+    }
+
+    public function siteMetrics(): HasMany
+    {
+        return $this->hasMany(SiteMetric::class);
+    }
+
+    public function uptimeChecks(): HasMany
+    {
+        return $this->hasMany(UptimeCheck::class);
+    }
+
+    public function incidents(): HasMany
+    {
+        return $this->hasMany(Incident::class);
+    }
+
+    public function latestMetric(string $metricType): ?SiteMetric
+    {
+        return $this->siteMetrics()
+            ->where('metric_type', $metricType)
+            ->latest('observed_at')
+            ->first();
+    }
 }

@@ -4,6 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Requests\ConnectorHeartbeatRequest;
 use App\Http\Requests\ConnectorRegisterRequest;
+use App\Http\Requests\ConnectorTelemetryRequest;
+use App\Jobs\ProcessHealthCheck;
+use App\Models\HealthCheck;
+use App\Models\Site;
 use App\Models\SiteConnection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -69,5 +73,32 @@ class ConnectorController extends BaseController
                 'discovered_at' => $cap->discovered_at?->toIso8601String(),
             ])->values()->all()
         );
+    }
+
+    public function telemetry(ConnectorTelemetryRequest $request)
+    {
+        /** @var SiteConnection $connection */
+        $connection = $request->attributes->get('connector_connection');
+
+        $siteId = $connection->site_id;
+        $now = now();
+
+        foreach ($request->input('observations') as $observation) {
+            HealthCheck::create([
+                'site_id' => $siteId,
+                'check_type' => $observation['check_type'],
+                'status' => $observation['status'],
+                'value_json' => $observation['value'] ?? [],
+                'checked_at' => $observation['checked_at'] ?? $now,
+            ]);
+        }
+
+        ProcessHealthCheck::dispatch($siteId)
+            ->delay(now()->addSeconds(5));
+
+        return $this->successResponse([
+            'connection_id' => $connection->id,
+            'observations_stored' => count($request->input('observations')),
+        ]);
     }
 }

@@ -1,4 +1,4 @@
-import { SiteConnection } from './types';
+import { SiteConnection, SiteHealth, SiteMetricsResponse, Incident } from './types';
 
 export class ApiError extends Error {
   public statusCode: number;
@@ -146,4 +146,18 @@ export const api = {
 
   listConnections: (siteId: string): Promise<ApiResponse<SiteConnection[]>> =>
     request(`/sites/${siteId}/connections`, { method: 'GET' }),
+
+  getSiteHealth: (siteId: string): Promise<ApiResponse<SiteHealth>> =>
+    request(`/sites/${siteId}/health`, { method: 'GET' }),
+
+  getSiteMetrics: (siteId: string): Promise<ApiResponse<SiteMetricsResponse>> =>
+    request(`/sites/${siteId}/metrics`, { method: 'GET' }),
+
+  getSiteIncidents: (siteId: string, params?: { status?: string; per_page?: number }): Promise<ApiResponse<Incident[]>> => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.append('status', params.status);
+    if (params?.per_page) qs.append('per_page', String(params.per_page));
+    const query = qs.toString();
+    return request(`/sites/${siteId}/incidents${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
 };
