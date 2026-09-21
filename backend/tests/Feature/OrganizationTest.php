@@ -220,4 +220,32 @@ class OrganizationTest extends TestCase
 
         $response->assertStatus(403);
     }
+
+    public function test_update_organization_with_own_slug_succeeds(): void
+    {
+        $user = User::factory()->create();
+        $org = Organization::factory()->create(['slug' => 'existing-slug']);
+
+        OrganizationMember::create([
+            'organization_id' => $org->id,
+            'user_id' => $user->id,
+            'role_id' => Role::factory()->create(['organization_id' => $org->id, 'key' => 'owner'])->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->patchJson('/api/v1/organizations/' . $org->id, [
+            'name' => 'Updated Name',
+            'slug' => 'existing-slug',
+        ]);
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'data' => [
+                    'name' => 'Updated Name',
+                    'slug' => 'existing-slug',
+                ],
+            ]);
+    }
 }

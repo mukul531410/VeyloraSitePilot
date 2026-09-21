@@ -7,7 +7,7 @@ interface User {
   id: number;
   name: string;
   email: string;
-  status: string | null;
+  status: string;
   last_login_at: string | null;
   organizations: {
     id: string;
@@ -71,31 +71,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    void (async () => {
-      const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) : null;
-      if (!token) {
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
-      try {
-        const response = await api.me();
-        setUser(response.data.user as User);
-        setError(null);
-      } catch (err) {
-        const apiError = err as ApiError;
-        if (apiError.statusCode === 401) {
-          setToken(null);
-          setUser(null);
-        } else {
-          setError(apiError.message);
-        }
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-fetching pattern
+    void refreshUser();
+  }, [refreshUser]);
 
   const login = async (email: string, password: string) => {
     setLoading(true);

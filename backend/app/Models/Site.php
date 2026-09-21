@@ -25,7 +25,6 @@ class Site extends Model
     protected $casts = [
         'environment' => 'string',
         'status' => 'string',
-        'notes' => 'string',
     ];
 
     public function organization(): BelongsTo

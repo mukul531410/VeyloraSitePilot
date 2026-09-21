@@ -53,7 +53,27 @@ class AuthTest extends TestCase
             'password' => 'wrong-password',
         ]);
 
-        $response->assertStatus(422);
+        $response->assertStatus(401);
+    }
+
+    public function test_login_invalid_credentials_returns_api_error_format(): void
+    {
+        $response = $this->postJson('/api/v1/auth/login', [
+            'email' => 'nonexistent@example.com',
+            'password' => 'wrong-password',
+        ]);
+
+        $response->assertStatus(401)
+            ->assertJsonStructure([
+                'error' => ['code', 'message', 'details'],
+                'request_id',
+            ])
+            ->assertJson([
+                'error' => [
+                    'code' => 'unauthorized',
+                    'message' => 'Invalid credentials.',
+                ],
+            ]);
     }
 
     public function test_login_validation_errors(): void
