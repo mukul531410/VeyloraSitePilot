@@ -35,6 +35,7 @@ class Incident extends Model
 
     protected $fillable = [
         'site_id',
+        'incident_key',
         'type',
         'severity',
         'status',

@@ -22,6 +22,7 @@ class HealthCheck extends Model
     public const STATUS_PASS = 'pass';
     public const STATUS_WARN = 'warn';
     public const STATUS_FAIL = 'fail';
+    public const STATUS_UNKNOWN = 'unknown';
 
     public const STATE_HEALTHY = 'healthy';
     public const STATE_ATTENTION = 'attention';

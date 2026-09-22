@@ -24,6 +24,17 @@ The central SitePilot application owns product logic, orchestration, automation,
 
 ## Development status
 
-Phase 0 — Architecture and specification.
+Phase 4 — Monitoring backend foundation in progress.
+
+- Phase 0: Specification
+- Phase 1: Platform foundation (Laravel, Next.js, auth, organizations, sites, API)
+- Phase 2: Site management (sites, metadata, connection intents, dashboard)
+- Phase 3: Connector contract (connection protocol, heartbeat, capabilities, registration)
+- Phase 4: Monitoring backend foundation (health checks, uptime, incidents, metrics, scheduler)
+- Phase 5: Maintenance Operations (planned)
+- Phase 6: Automation (planned)
+- Phase 7: AI (planned)
+- Phase 8: Production Hardening (planned)
+- Phase 9: SaaS (planned)
 
 No production connector or WordPress test site is being built yet.

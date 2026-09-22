@@ -51,9 +51,16 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
     {
         $this->now = now();
 
-        $site = Site::findOrFail($this->siteId);
+        Site::findOrFail($this->siteId);
 
-        DB::transaction(fn () => $this->runHealthCheck($site));
+        DB::transaction(function (): void {
+            $site = Site::query()
+                ->whereKey($this->siteId)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->runHealthCheck($site);
+        });
     }
 
     private function runHealthCheck(Site $site): void
@@ -68,13 +75,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
 
         $healthState = $this->computeHealthState($checks);
 
-        SiteMetric::create([
-            'site_id' => $site->id,
-            'metric_type' => SiteMetric::METRIC_TYPE_HEALTH_STATE,
-            'value' => null,
-            'unit' => $healthState,
-            'observed_at' => $this->now,
-        ]);
+        $this->persistMetrics($site, $signals, $healthState);
 
         $this->manageIncidents($site, $checks);
     }
@@ -98,7 +99,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             ->latest('checked_at')
             ->first();
 
-        $latestHeartbeatTime = $connection ? $connection->last_seen_at : null;
+        $latestHeartbeatTime = $heartbeat?->reported_at;
 
         $heartbeatAgeMinutes = null;
         if ($latestHeartbeatTime) {
@@ -119,6 +120,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             'uptime_status' => $uptimeStatus,
             'http_status' => $httpStatus,
             'uptime_check_fresh' => $uptimeFresh,
+            'ssl_check' => $this->latestSslCheck($site),
         ];
     }
 
@@ -131,6 +133,9 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
         $checks['http_response'] = $this->evaluateHttpResponse($signals);
         $checks['wordpress_state'] = $this->evaluateWordPressState($signals);
         $checks['reachability'] = $this->evaluateReachability($signals);
+        if ($signals['ssl_check'] !== null) {
+            $checks['ssl'] = $this->evaluateSsl($signals['ssl_check']);
+        }
         $checks['critical_findings'] = $this->evaluateCriticalFindings($signals);
 
         return $checks;
@@ -226,11 +231,34 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
         return $this->checkResult(HealthCheck::CHECK_TYPE_REACHABILITY, HealthCheck::STATUS_PASS, ['heartbeat_ok' => $heartbeatOk, 'uptime_ok' => $uptimeOk], $incidentType, null);
     }
 
+    private function evaluateSsl(?HealthCheck $check): array
+    {
+        $incidentType = self::$incidentTypeMap[HealthCheck::CHECK_TYPE_SSL];
+
+        if (! $check) {
+            return $this->checkResult(HealthCheck::CHECK_TYPE_SSL, HealthCheck::STATUS_UNKNOWN, ['reason' => 'no_ssl_data'], $incidentType, null);
+        }
+
+        return $this->checkResult(
+            HealthCheck::CHECK_TYPE_SSL,
+            $check->status,
+            $check->value_json ?? ['reason' => 'ssl_data_unavailable'],
+            $incidentType,
+            $check->status === HealthCheck::STATUS_FAIL ? Incident::SEVERITY_HIGH : null,
+        );
+    }
+
     private function evaluateCriticalFindings(array $signals): array
     {
         $incidentType = self::$incidentTypeMap[HealthCheck::CHECK_TYPE_CRITICAL_FINDINGS];
 
-        return $this->checkResult(HealthCheck::CHECK_TYPE_CRITICAL_FINDINGS, HealthCheck::STATUS_PASS, ['findings_count' => 0], $incidentType, null);
+        return $this->checkResult(
+            HealthCheck::CHECK_TYPE_CRITICAL_FINDINGS,
+            HealthCheck::STATUS_UNKNOWN,
+            ['reason' => 'security_findings_source_deferred'],
+            $incidentType,
+            null,
+        );
     }
 
     private function checkResult(string $checkType, string $status, array $value, ?string $incidentType, ?string $severity): array
@@ -262,6 +290,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
         $hasCriticalFail = false;
         $hasFail = false;
         $hasWarn = false;
+        $hasUnknown = false;
         $hasActiveConnection = false;
 
         foreach ($checks as $check) {
@@ -288,6 +317,10 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             if ($check['status'] === HealthCheck::STATUS_WARN) {
                 $hasWarn = true;
             }
+
+            if ($check['status'] === HealthCheck::STATUS_UNKNOWN) {
+                $hasUnknown = true;
+            }
         }
 
         if (! $hasActiveConnection) {
@@ -304,6 +337,10 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
 
         if ($hasWarn) {
             return HealthCheck::STATE_ATTENTION;
+        }
+
+        if ($hasUnknown) {
+            return HealthCheck::STATE_UNKNOWN;
         }
 
         return HealthCheck::STATE_HEALTHY;
@@ -339,6 +376,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
                 'status' => Incident::STATUS_RESOLVED,
                 'resolved_at' => $this->now,
                 'last_detected_at' => $this->now,
+                'incident_key' => null,
             ]);
     }
 
@@ -362,6 +400,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             if ($existing) {
                 $existing->update([
                     'last_detected_at' => $this->now,
+                    'incident_key' => $existing->incident_key ?: $site->id . ':' . $incidentType,
                 ]);
 
                 continue;
@@ -382,6 +421,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
                     'severity' => $severity,
                     'title' => $this->generateIncidentTitle($checkType),
                     'description' => $this->generateIncidentDescription($check),
+                    'incident_key' => $site->id . ':' . $incidentType,
                 ]);
 
                 continue;
@@ -396,8 +436,68 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
                 'description' => $this->generateIncidentDescription($check),
                 'first_detected_at' => $this->now,
                 'last_detected_at' => $this->now,
+                'incident_key' => $site->id . ':' . $incidentType,
             ]);
         }
+    }
+
+    private function latestSslCheck(Site $site): ?HealthCheck
+    {
+        if (parse_url($site->url, PHP_URL_SCHEME) !== 'https') {
+            return null;
+        }
+
+        return $site->healthChecks()
+            ->where('check_type', HealthCheck::CHECK_TYPE_SSL)
+            ->where('checked_at', '>=', $this->now->copy()->subMinutes(15))
+            ->latest('checked_at')
+            ->first();
+    }
+
+    private function persistMetrics(Site $site, array $signals, string $healthState): void
+    {
+        $this->storeMetric($site, SiteMetric::METRIC_TYPE_HEALTH_STATE, null, $healthState);
+
+        $windowStart = $this->now->copy()->subDay();
+        $uptimeChecks = $site->uptimeChecks()
+            ->where('checked_at', '>=', $windowStart)
+            ->get();
+
+        if ($uptimeChecks->isNotEmpty()) {
+            $uptimePercent = round($uptimeChecks->where('status', UptimeCheck::STATUS_UP)->count() / $uptimeChecks->count() * 100, 4);
+            $this->storeMetric($site, SiteMetric::METRIC_TYPE_UPTIME_PERCENT, $uptimePercent, '%');
+
+            $responseTimes = $uptimeChecks->whereNotNull('response_ms')->pluck('response_ms');
+            if ($responseTimes->isNotEmpty()) {
+                $this->storeMetric($site, SiteMetric::METRIC_TYPE_RESPONSE_MS, round($responseTimes->avg(), 4), 'ms');
+            }
+        }
+
+        if ($signals['heartbeat_age_minutes'] !== null) {
+            $this->storeMetric($site, SiteMetric::METRIC_TYPE_HEARTBEAT_AGE_MINUTES, round($signals['heartbeat_age_minutes'], 4), 'minutes');
+        }
+    }
+
+    private function storeMetric(Site $site, string $metricType, ?float $value, ?string $unit): void
+    {
+        $bucketStart = $this->now->copy()->startOfMinute();
+        $metric = $site->siteMetrics()
+            ->where('metric_type', $metricType)
+            ->where('observed_at', '>=', $bucketStart)
+            ->latest('observed_at')
+            ->first();
+
+        if ($metric) {
+            $metric->update(['value' => $value, 'unit' => $unit, 'observed_at' => $this->now]);
+            return;
+        }
+
+        $site->siteMetrics()->create([
+            'metric_type' => $metricType,
+            'value' => $value,
+            'unit' => $unit,
+            'observed_at' => $this->now,
+        ]);
     }
 
     private function generateIncidentTitle(string $checkType): string

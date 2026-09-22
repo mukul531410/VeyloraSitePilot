@@ -1,6 +1,18 @@
 # Veylora SitePilot — Implementation Plan
 
-## Phase 1A — Repository and environment
+## Phase 0 — Specification
+- product vision
+- architecture
+- module boundaries
+- database design
+- API contract
+- security model
+- automation model
+- AI boundaries
+- testing strategy
+
+## Phase 1 — Platform Foundation
+### Phase 1A — Repository and environment
 1. Clone/use D:\VeyloraSitePilot.
 2. Initialize Laravel backend.
 3. Initialize Next.js frontend.
@@ -42,23 +54,66 @@ Create organization → create site → view site → site status.
 
 Do not build every module simultaneously.
 
-## Phase 2 — Site connection foundation
-Implement connection intent and connector contract without production remote actions.
+## Phase 2 — Site Management
+- sites
+- site metadata
+- connection intents
+- site state
+- dashboard foundation
 
-## Phase 3 — Monitoring
-Implement read-only inventory, health and heartbeat flows.
+## Phase 3 — Connector Contract
+- finalize connector protocol
+- capability model
+- heartbeat
+- inventory contract
+- operation contract
+- verification contract
 
-## Phase 4 — Operations
-Implement controlled operations and verification.
+Only now create the local WordPress test environment.
 
-## Phase 5 — Automation
-Implement scheduler, rules, policy and approvals.
+## Phase 4 — Monitoring
+- backend monitoring foundation: health checks, uptime, incidents, metrics, scheduler
+- server-side HTTPS certificate inspection
+- inventory, notifications, and security findings remain pending
 
-## Phase 6 — AI
-Add analysis/recommendation features on top of deterministic data.
+## Phase 5 — Maintenance Operations
+- update checks
+- controlled plugin/theme/core operations
+- backups
+- cache operations
+- verification
 
-## Phase 7 — Production hardening
-Security, performance, observability, recovery and deployment.
+## Phase 6 — Automation
+- scheduler
+- rule engine
+- policy engine
+- approval flow
+- retries
+- locking
+
+## Phase 7 — AI
+- summaries
+- diagnosis assistance
+- recommendations
+- plans
+- approved execution assistance
+
+## Phase 8 — Production Hardening
+- security review
+- load testing
+- backup/restore
+- observability
+- rate limits
+- deployment
+- documentation
+
+## Phase 9 — SaaS
+- plans
+- billing
+- tenant limits
+- usage
+- onboarding
+- white-label capabilities
 
 ## Git workflow
 - main = stable

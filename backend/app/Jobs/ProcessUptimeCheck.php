@@ -3,7 +3,9 @@
 namespace App\Jobs;
 
 use App\Models\Site;
+use App\Models\HealthCheck;
 use App\Models\UptimeCheck;
+use App\Services\SslCertificateInspector;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -41,10 +43,11 @@ class ProcessUptimeCheck implements ShouldQueue, ShouldBeUnique
         $httpStatus = null;
         $responseMs = null;
         $status = UptimeCheck::STATUS_DOWN;
+        $requestStartedAt = microtime(true);
 
         try {
             $response = Http::timeout(10)->get($site->url);
-            $responseMs = (int) ($response->elapsedInfo()['total_time'] * 1000);
+            $responseMs = (int) round((microtime(true) - $requestStartedAt) * 1000);
 
             if ($response->successful() || $response->redirect()) {
                 $status = UptimeCheck::STATUS_UP;
@@ -65,6 +68,18 @@ class ProcessUptimeCheck implements ShouldQueue, ShouldBeUnique
             'response_ms' => $responseMs,
             'checked_at' => $startTime,
         ]);
+
+        if (parse_url($site->url, PHP_URL_SCHEME) === 'https') {
+            $sslCheck = app(SslCertificateInspector::class)->inspect($site->url);
+
+            HealthCheck::create([
+                'site_id' => $site->id,
+                'check_type' => HealthCheck::CHECK_TYPE_SSL,
+                'status' => $sslCheck['status'],
+                'value_json' => $sslCheck['value'],
+                'checked_at' => $startTime,
+            ]);
+        }
 
         Log::info('ProcessUptimeCheck completed', [
             'site_id' => $site->id,
