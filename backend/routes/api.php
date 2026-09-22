@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ConnectorController;
 use App\Http\Controllers\Api\SiteConnectionController;
 use App\Http\Controllers\Api\SiteMonitoringController;
+use App\Http\Controllers\Api\OperationsController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function (): void {
@@ -45,6 +46,9 @@ Route::prefix('v1')->group(function (): void {
         Route::get('/sites/{site}/health', [SiteMonitoringController::class, 'health']);
         Route::get('/sites/{site}/metrics', [SiteMonitoringController::class, 'metrics']);
         Route::get('/sites/{site}/incidents', [SiteMonitoringController::class, 'incidents']);
+
+        Route::post('/sites/{site}/operations', [OperationsController::class, 'store']);
+        Route::get('/sites/{site}/operations/{operation}', [OperationsController::class, 'show']);
     });
 
     Route::middleware('connector')->group(function (): void {

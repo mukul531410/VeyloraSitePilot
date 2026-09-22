@@ -16,10 +16,12 @@ class Organization extends Model
         'name',
         'slug',
         'status',
+        'approval_policy',
     ];
 
     protected $casts = [
         'status' => 'string',
+        'approval_policy' => 'array',
     ];
 
     public function users(): BelongsToMany

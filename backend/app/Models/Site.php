@@ -64,6 +64,11 @@ class Site extends Model
         return $this->hasMany(Incident::class);
     }
 
+    public function operations(): HasMany
+    {
+        return $this->hasMany(Operation::class);
+    }
+
     public function latestMetric(string $metricType): ?SiteMetric
     {
         return $this->siteMetrics()

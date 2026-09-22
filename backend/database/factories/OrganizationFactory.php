@@ -19,6 +19,10 @@ class OrganizationFactory extends Factory
             'name' => $name,
             'slug' => Str::slug($name),
             'status' => 'active',
+            'approval_policy' => [
+                'require_approval' => false,
+                'high_criticality_requires_approval' => false,
+            ],
         ];
     }
 }
