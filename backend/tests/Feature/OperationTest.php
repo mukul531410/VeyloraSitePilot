@@ -58,6 +58,25 @@ class OperationTest extends TestCase
         return $connection;
     }
 
+    private function createQueuedOperation(): Operation
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => false,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => uniqid('dispatch-', true),
+        ]);
+        $response->assertStatus(201)->assertJsonPath('data.status', Operation::STATUS_QUEUED);
+
+        return Operation::findOrFail($response->json('data.id'));
+    }
+
     public function test_unauthenticated_user_cannot_create_operation(): void
     {
         $organization = Organization::factory()->create();
@@ -505,6 +524,204 @@ class OperationTest extends TestCase
             'action' => 'operation_requested',
         ]);
         $this->assertDatabaseHas('approval_requests', ['operation_id' => $operationId]);
+    }
+
+    public function test_dispatching_queued_operation_creates_one_dispatched_attempt_with_connector_fields(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $this->app->make(MaintenanceLock::class),
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+
+        $this->assertDatabaseCount('operation_attempts', 1);
+        $attempt = OperationAttempt::firstOrFail();
+        $this->assertSame(1, $attempt->attempt_number);
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->status);
+        $this->assertNotNull($attempt->connector_job_id);
+        $this->assertNotNull($attempt->lock_token);
+        $this->assertNotNull($attempt->timeout_at);
+    }
+
+    public function test_dispatching_queued_operation_changes_operation_to_running(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $this->app->make(MaintenanceLock::class),
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+
+        $this->assertDatabaseHas('operations', [
+            'id' => $operation->id,
+            'status' => Operation::STATUS_RUNNING,
+        ]);
+    }
+
+    public function test_dispatching_same_operation_twice_does_not_create_second_attempt(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+        $job = new \App\Jobs\DispatchOperationJob($operation->id);
+        $maintenanceLock = $this->app->make(MaintenanceLock::class);
+        $policyEngine = $this->app->make(\App\Services\PolicyEngine::class);
+
+        $job->handle($maintenanceLock, $policyEngine);
+        $job->handle($maintenanceLock, $policyEngine);
+
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_dispatching_pending_approval_operation_does_not_create_attempt(): void
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => true,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'dispatch-pending-approval',
+        ]);
+        $response->assertStatus(201)->assertJsonPath('data.status', Operation::STATUS_PENDING_APPROVAL);
+        $operation = Operation::findOrFail($response->json('data.id'));
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $this->app->make(MaintenanceLock::class),
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+
+        $this->assertDatabaseCount('operation_attempts', 0);
+        $this->assertDatabaseHas('operations', [
+            'id' => $operation->id,
+            'status' => Operation::STATUS_PENDING_APPROVAL,
+        ]);
+    }
+
+    private function createDispatchedJob(string $token = 'site-a-token'): array
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => false,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $connection = $this->createConnectorWithToken($site, $token);
+        ConnectorCapability::create([
+            'site_connection_id' => $connection->id,
+            'capability_key' => 'action.cache_clear',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => uniqid('poll-', true),
+        ]);
+        $response->assertStatus(201);
+
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+        \App\Jobs\DispatchOperationJob::dispatch($response->json('data.id'));
+        $attempt = OperationAttempt::firstOrFail();
+
+        return [$site, $attempt->fresh(), $attempt->connector_job_id, $token];
+    }
+
+    public function test_authenticated_connector_can_poll_its_own_available_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob();
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.0.job_id', $jobId)
+            ->assertJsonPath('data.0.operation_id', $attempt->operation_id)
+            ->assertJsonPath('data.0.operation_type', 'action.cache_clear');
+    }
+
+    public function test_connector_cannot_poll_job_belonging_to_another_site(): void
+    {
+        [$site, $attempt, $jobId] = $this->createDispatchedJob();
+        [, , $otherSite] = $this->createUserWithSite();
+        $otherToken = 'site-b-token';
+        $this->createConnectorWithToken($otherSite, $otherToken);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $otherToken])
+            ->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(200)->assertJsonPath('data', []);
+    }
+
+    public function test_unauthenticated_connector_cannot_poll_jobs(): void
+    {
+        $response = $this->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(401)->assertJsonPath('error.code', 'unauthorized');
+    }
+
+    public function test_invalid_connector_token_cannot_poll_jobs(): void
+    {
+        $response = $this->withHeaders(['Authorization' => 'Bearer invalid-connector-token'])
+            ->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(401)->assertJsonPath('error.code', 'unauthorized');
+    }
+
+    public function test_claimed_job_is_not_returned_as_an_available_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('poll-claimed-token');
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(200)->assertJsonPath('data', []);
+    }
+
+    public function test_pending_approval_operation_is_not_exposed_through_polling(): void
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => true,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $token = 'pending-poll-token';
+        $connection = $this->createConnectorWithToken($site, $token);
+        ConnectorCapability::create([
+            'site_connection_id' => $connection->id,
+            'capability_key' => 'action.cache_clear',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'pending-poll-operation',
+        ]);
+        $response->assertStatus(201)->assertJsonPath('data.status', Operation::STATUS_PENDING_APPROVAL);
+
+        $pollResponse = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->getJson('/api/v1/connector/jobs');
+
+        $pollResponse->assertStatus(200)->assertJsonPath('data', []);
+    }
+
+    public function test_terminal_operation_is_not_exposed_through_polling(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('terminal-poll-token');
+        Operation::findOrFail($attempt->operation_id)->update(['status' => Operation::STATUS_SUCCEEDED]);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->getJson('/api/v1/connector/jobs');
+
+        $response->assertStatus(200)->assertJsonPath('data', []);
     }
 
     private function createClaimedJob(string $token = 'site-a-token'): array
