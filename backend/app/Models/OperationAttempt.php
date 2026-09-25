@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class OperationAttempt extends Model
 {
@@ -32,6 +33,9 @@ class OperationAttempt extends Model
         'attempt_number',
         'status',
         'connector_job_id',
+        'lock_token',
+        'retryable',
+        'timeout_at',
         'started_at',
         'finished_at',
         'error_code',
@@ -40,13 +44,20 @@ class OperationAttempt extends Model
 
     protected $casts = [
         'error_details_json' => 'array',
+        'retryable' => 'boolean',
         'started_at' => 'datetime',
         'finished_at' => 'datetime',
+        'timeout_at' => 'datetime',
     ];
 
     public function operation(): BelongsTo
     {
         return $this->belongsTo(Operation::class);
+    }
+
+    public function result(): HasOne
+    {
+        return $this->hasOne(OperationResult::class, 'operation_attempt_id');
     }
 
     public function isTerminal(): bool

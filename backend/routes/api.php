@@ -55,6 +55,9 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/connector/heartbeat', [ConnectorController::class, 'heartbeat']);
         Route::get('/connector/capabilities', [ConnectorController::class, 'capabilities']);
         Route::post('/connector/telemetry', [ConnectorController::class, 'telemetry']);
+        Route::get('/connector/jobs', [ConnectorController::class, 'jobs']);
+        Route::post('/connector/jobs/{job}/claim', [ConnectorController::class, 'claimJob']);
+        Route::post('/connector/jobs/{job}/result', [ConnectorController::class, 'submitResult']);
     });
 
     Route::post('/connector/register', [ConnectorController::class, 'register']);

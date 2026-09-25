@@ -19,7 +19,14 @@ class OperationResult extends Model
 
     protected $fillable = [
         'operation_id',
+        'operation_attempt_id',
+        'connector_job_id',
         'result_status',
+        'cache_cleared_at',
+        'cleared_types',
+        'cache_generation',
+        'error_code',
+        'error_message',
         'expected_state_json',
         'actual_state_json',
         'verification_status',
@@ -27,6 +34,8 @@ class OperationResult extends Model
     ];
 
     protected $casts = [
+        'cache_cleared_at' => 'datetime',
+        'cleared_types' => 'array',
         'expected_state_json' => 'array',
         'actual_state_json' => 'array',
     ];
@@ -34,6 +43,11 @@ class OperationResult extends Model
     public function operation(): BelongsTo
     {
         return $this->belongsTo(Operation::class);
+    }
+
+    public function attempt(): BelongsTo
+    {
+        return $this->belongsTo(OperationAttempt::class, 'operation_attempt_id');
     }
 
     public function isVerified(): bool
