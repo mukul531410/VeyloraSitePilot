@@ -33,6 +33,7 @@ class OperationAttempt extends Model
         'attempt_number',
         'status',
         'connector_job_id',
+        'claimed_by_connection_id',
         'lock_token',
         'retryable',
         'timeout_at',

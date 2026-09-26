@@ -142,75 +142,105 @@ class ConnectorController extends BaseController
     {
         /** @var SiteConnection $connection */
         $connection = $request->attributes->get('connector_connection');
+        $lock = null;
 
-        $attempt = OperationAttempt::where('connector_job_id', $jobId)
-            ->whereHas('operation.site', function ($query) use ($connection) {
-                $query->where('id', $connection->site_id);
-            })
-            ->whereHas('operation', function ($query) {
-                $query->where('operation_type', 'action.cache_clear');
-            })
-            ->first();
+        try {
+            $response = DB::transaction(function () use ($jobId, $connection, &$lock) {
+                $attempt = OperationAttempt::where('connector_job_id', $jobId)
+                    ->whereHas('operation.site', function ($query) use ($connection) {
+                        $query->where('id', $connection->site_id);
+                    })
+                    ->whereHas('operation', function ($query) {
+                        $query->where('operation_type', 'action.cache_clear');
+                    })
+                    ->lockForUpdate()
+                    ->first();
 
-        if (! $attempt) {
-            return $this->errorResponse('Job not found', 'not_found', 404);
+                if (! $attempt) {
+                    return $this->errorResponse('Job not found', 'not_found', 404);
+                }
+
+                $capability = $connection->capabilities()
+                    ->where('capability_key', 'action.cache_clear')
+                    ->where('enabled', true)
+                    ->first();
+
+                if (! $capability) {
+                    return $this->errorResponse('Capability not granted', 'capability_denied', 403);
+                }
+
+                $lockToken = $attempt->lock_token ?? $attempt->operation_id . ':' . $attempt->attempt_number;
+
+                if ($attempt->status !== OperationAttempt::STATUS_DISPATCHED) {
+                    if ($attempt->claimed_by_connection_id === $connection->id) {
+                        return $this->successResponse([
+                            'job_id' => $attempt->connector_job_id,
+                            'operation_id' => $attempt->operation_id,
+                            'attempt_number' => $attempt->attempt_number,
+                            'operation_type' => $attempt->operation->operation_type,
+                            'target_json' => $attempt->operation->target_json,
+                            'idempotency_key' => $attempt->operation->idempotency_key,
+                            'lock_token' => $lockToken,
+                        ]);
+                    }
+
+                    return $this->errorResponse('Job already claimed', 'already_claimed', 409);
+                }
+
+                $maintenanceLock = app(MaintenanceLock::class);
+
+                $lockAcquired = $maintenanceLock->acquire(
+                    $connection->site_id,
+                    $attempt->operation_id,
+                    $attempt->attempt_number
+                );
+
+                if (! $lockAcquired) {
+                    return $this->errorResponse('Could not acquire lock', 'lock_unavailable', 409);
+                }
+
+                $lock = [$connection->site_id, $attempt->operation_id, $attempt->attempt_number];
+
+                $attempt->update([
+                    'status' => OperationAttempt::STATUS_ACCEPTED,
+                    'claimed_by_connection_id' => $connection->id,
+                ]);
+
+                \App\Models\AuditLog::create([
+                    'organization_id' => $connection->site->organization_id,
+                    'user_id' => null,
+                    'site_id' => $connection->site_id,
+                    'action' => 'job_claimed',
+                    'target_type' => 'operation',
+                    'target_id' => $attempt->operation_id,
+                    'correlation_id' => $attempt->operation_id,
+                    'policy_result' => $attempt->operation->policy_result,
+                    'metadata_json' => [
+                        'operation_type' => 'action.cache_clear',
+                        'attempt_id' => $attempt->id,
+                        'attempt_number' => $attempt->attempt_number,
+                        'connector_job_id' => $attempt->connector_job_id,
+                        'claimed_at' => now()->toIso8601String(),
+                    ],
+                ]);
+
+                return $this->successResponse([
+                    'job_id' => $attempt->connector_job_id,
+                    'operation_id' => $attempt->operation_id,
+                    'attempt_number' => $attempt->attempt_number,
+                    'operation_type' => $attempt->operation->operation_type,
+                    'target_json' => $attempt->operation->target_json,
+                    'idempotency_key' => $attempt->operation->idempotency_key,
+                    'lock_token' => $lockToken,
+                ]);
+            });
+        } finally {
+            if ($lock !== null) {
+                app(MaintenanceLock::class)->release($lock[0], $lock[1], $lock[2]);
+            }
         }
 
-        $capability = $connection->capabilities()
-            ->where('capability_key', 'action.cache_clear')
-            ->where('enabled', true)
-            ->first();
-
-        if (! $capability) {
-            return $this->errorResponse('Capability not granted', 'capability_denied', 403);
-        }
-
-        $maintenanceLock = app(MaintenanceLock::class);
-        $lockToken = $attempt->lock_token ?? $attempt->operation_id . ':' . $attempt->attempt_number;
-
-        $lockAcquired = $maintenanceLock->acquire(
-            $connection->site_id,
-            $attempt->operation_id,
-            $attempt->attempt_number
-        );
-
-        if (! $lockAcquired) {
-            return $this->errorResponse('Could not acquire lock', 'lock_unavailable', 409);
-        }
-
-        if ($attempt->status === OperationAttempt::STATUS_DISPATCHED) {
-            $attempt->update([
-                'status' => OperationAttempt::STATUS_ACCEPTED,
-            ]);
-        }
-
-        \App\Models\AuditLog::create([
-            'organization_id' => $connection->site->organization_id,
-            'user_id' => null,
-            'site_id' => $connection->site_id,
-            'action' => 'job_claimed',
-            'target_type' => 'operation',
-            'target_id' => $attempt->operation_id,
-            'correlation_id' => $attempt->operation_id,
-            'policy_result' => $attempt->operation->policy_result,
-            'metadata_json' => [
-                'operation_type' => 'action.cache_clear',
-                'attempt_id' => $attempt->id,
-                'attempt_number' => $attempt->attempt_number,
-                'connector_job_id' => $attempt->connector_job_id,
-                'claimed_at' => now()->toIso8601String(),
-            ],
-        ]);
-
-        return $this->successResponse([
-            'job_id' => $attempt->connector_job_id,
-            'operation_id' => $attempt->operation_id,
-            'attempt_number' => $attempt->attempt_number,
-            'operation_type' => $attempt->operation->operation_type,
-            'target_json' => $attempt->operation->target_json,
-            'idempotency_key' => $attempt->operation->idempotency_key,
-            'lock_token' => $lockToken,
-        ]);
+        return $response;
     }
 
     public function submitResult(ConnectorSubmitResultRequest $request, string $jobId)

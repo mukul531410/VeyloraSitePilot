@@ -37,65 +37,75 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
         MaintenanceLock $maintenanceLock,
         PolicyEngine $policyEngine,
     ): void {
-        DB::transaction(function () use ($maintenanceLock, $policyEngine) {
-            $operation = Operation::with(['site', 'site.organization'])
-                ->whereKey($this->operationId)
-                ->firstOrFail();
+        $lock = null;
 
-            if ($operation->operation_type !== 'action.cache_clear') {
-                throw new RuntimeException('Unsupported operation type: ' . $operation->operation_type);
+        try {
+            DB::transaction(function () use ($maintenanceLock, $policyEngine, &$lock) {
+                $operation = Operation::with(['site', 'site.organization'])
+                    ->whereKey($this->operationId)
+                    ->firstOrFail();
+
+                if ($operation->operation_type !== 'action.cache_clear') {
+                    throw new RuntimeException('Unsupported operation type: ' . $operation->operation_type);
+                }
+
+                if ($operation->status !== Operation::STATUS_QUEUED) {
+                    return;
+                }
+
+                $site = $operation->site;
+
+                $connection = $this->getActiveConnection($site);
+                if (! $connection) {
+                    throw new RuntimeException('No active site connection');
+                }
+
+                $capability = $this->getCapability($connection, $operation->operation_type);
+                if (! $capability || ! $capability->enabled) {
+                    throw new RuntimeException('Capability not granted: ' . $operation->operation_type);
+                }
+
+                $attemptNumber = $operation->attempts()->max('attempt_number') ?? 0;
+                $attemptNumber++;
+
+                $connectorJobId = (string) Str::ulid();
+                $lockToken = $operation->id . ':' . $attemptNumber;
+
+                $lockAcquired = $maintenanceLock->acquire($site->id, $operation->id, $attemptNumber);
+                if (! $lockAcquired) {
+                    throw new RuntimeException('Could not acquire maintenance lock for site ' . $site->id);
+                }
+
+                $lock = [$site->id, $operation->id, $attemptNumber];
+
+                $attempt = OperationAttempt::create([
+                    'operation_id' => $operation->id,
+                    'attempt_number' => $attemptNumber,
+                    'status' => OperationAttempt::STATUS_DISPATCHED,
+                    'connector_job_id' => $connectorJobId,
+                    'lock_token' => $lockToken,
+                    'started_at' => now(),
+                    'timeout_at' => now()->addMinutes(2),
+                ]);
+
+                $operation->update([
+                    'status' => Operation::STATUS_RUNNING,
+                    'started_at' => now(),
+                ]);
+
+                $this->auditLog($operation, 'attempt_dispatched', [
+                    'operation_id' => $operation->id,
+                    'attempt_id' => $attempt->id,
+                    'attempt_number' => $attemptNumber,
+                    'connector_job_id' => $connectorJobId,
+                    'lock_acquired' => true,
+                ]);
+            });
+        } finally {
+            if ($lock !== null) {
+                $maintenanceLock->release($lock[0], $lock[1], $lock[2]);
             }
-
-            if ($operation->status !== Operation::STATUS_QUEUED) {
-                return;
-            }
-
-            $site = $operation->site;
-
-            $connection = $this->getActiveConnection($site);
-            if (! $connection) {
-                throw new RuntimeException('No active site connection');
-            }
-
-            $capability = $this->getCapability($connection, $operation->operation_type);
-            if (! $capability || ! $capability->enabled) {
-                throw new RuntimeException('Capability not granted: ' . $operation->operation_type);
-            }
-
-            $attemptNumber = $operation->attempts()->max('attempt_number') ?? 0;
-            $attemptNumber++;
-
-            $connectorJobId = (string) Str::ulid();
-            $lockToken = $operation->id . ':' . $attemptNumber;
-
-            $lockAcquired = $maintenanceLock->acquire($site->id, $operation->id, $attemptNumber);
-            if (! $lockAcquired) {
-                throw new RuntimeException('Could not acquire maintenance lock for site ' . $site->id);
-            }
-
-            $attempt = OperationAttempt::create([
-                'operation_id' => $operation->id,
-                'attempt_number' => $attemptNumber,
-                'status' => OperationAttempt::STATUS_DISPATCHED,
-                'connector_job_id' => $connectorJobId,
-                'lock_token' => $lockToken,
-                'started_at' => now(),
-                'timeout_at' => now()->addMinutes(2),
-            ]);
-
-            $operation->update([
-                'status' => Operation::STATUS_RUNNING,
-                'started_at' => now(),
-            ]);
-
-            $this->auditLog($operation, 'attempt_dispatched', [
-                'operation_id' => $operation->id,
-                'attempt_id' => $attempt->id,
-                'attempt_number' => $attemptNumber,
-                'connector_job_id' => $connectorJobId,
-                'lock_acquired' => true,
-            ]);
-        });
+        }
     }
 
     private function getActiveConnection(Site $site): ?SiteConnection

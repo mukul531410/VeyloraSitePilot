@@ -561,6 +561,37 @@ class OperationTest extends TestCase
         ]);
     }
 
+    public function test_dispatching_operation_releases_maintenance_lock_after_persisting_attempt(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $lock = \Mockery::mock(MaintenanceLock::class);
+        $lock->shouldReceive('acquire')->once()->with($operation->site_id, $operation->id, 1)->andReturn(true);
+        $lock->shouldReceive('release')->once()->with($operation->site_id, $operation->id, 1)->andReturn(true);
+        $this->app->instance(MaintenanceLock::class, $lock);
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $lock,
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_claiming_job_releases_maintenance_lock_after_claim(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-lock-release-token');
+        $lock = \Mockery::mock(MaintenanceLock::class);
+        $lock->shouldReceive('acquire')->once()->with($site->id, $attempt->operation_id, 1)->andReturn(true);
+        $lock->shouldReceive('release')->once()->with($site->id, $attempt->operation_id, 1)->andReturn(true);
+        $this->app->instance(MaintenanceLock::class, $lock);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(200);
+        $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->fresh()->status);
+    }
+
     public function test_dispatching_same_operation_twice_does_not_create_second_attempt(): void
     {
         $operation = $this->createQueuedOperation();
@@ -724,6 +755,190 @@ class OperationTest extends TestCase
         $response->assertStatus(200)->assertJsonPath('data', []);
     }
 
+    public function test_authenticated_connector_can_claim_its_own_available_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-own-job-token');
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(200)
+            ->assertJsonPath('data.job_id', $jobId)
+            ->assertJsonPath('data.operation_id', $attempt->operation_id)
+            ->assertJsonPath('data.attempt_number', $attempt->attempt_number)
+            ->assertJsonPath('data.operation_type', 'action.cache_clear')
+            ->assertJsonStructure([
+                'data' => ['job_id', 'operation_id', 'attempt_number', 'operation_type', 'target_json', 'idempotency_key', 'lock_token'],
+            ]);
+
+        $attempt->refresh();
+        $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->status);
+        $this->assertSame($jobId, $attempt->connector_job_id);
+    }
+
+    public function test_same_connector_claiming_same_job_twice_is_idempotent(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-idempotent-token');
+        $headers = ['Authorization' => 'Bearer ' . $token];
+
+        $firstResponse = $this->withHeaders($headers)
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+        $secondResponse = $this->withHeaders($headers)
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $firstResponse->assertStatus(200);
+        $secondResponse->assertStatus(200);
+        $this->assertSame($firstResponse->json('data'), $secondResponse->json('data'));
+        $this->assertDatabaseCount('operation_attempts', 1);
+        $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->fresh()->status);
+    }
+
+    public function test_connector_from_another_site_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId] = $this->createDispatchedJob('claim-own-site-token');
+        [, , $otherSite] = $this->createUserWithSite();
+        $otherToken = 'claim-other-site-token';
+        $this->createConnectorWithToken($otherSite, $otherToken);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $otherToken])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(404)->assertJsonPath('error.code', 'not_found');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_invalid_connector_token_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId] = $this->createDispatchedJob('claim-valid-token');
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer invalid-connector-token'])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(401)->assertJsonPath('error.code', 'unauthorized');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_connector_without_required_capability_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-no-capability-token');
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->capabilities()->delete();
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(403)->assertJsonPath('error.code', 'capability_denied');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_connector_with_disabled_capability_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-disabled-capability-token');
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->capabilities()->update(['enabled' => false]);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(403)->assertJsonPath('error.code', 'capability_denied');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_revoked_connector_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-revoked-token');
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->revoke();
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(401)->assertJsonPath('error.code', 'unauthorized');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_inactive_connector_cannot_claim_job(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-inactive-token');
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->update(['status' => 'inactive']);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(401)->assertJsonPath('error.code', 'unauthorized');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_already_claimed_job_cannot_be_claimed_by_another_connector(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-original-token');
+        $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim')
+            ->assertStatus(200);
+
+        $otherToken = 'claim-another-connector-token';
+        $otherConnection = $this->createConnectorWithToken($site, $otherToken);
+        ConnectorCapability::create([
+            'site_connection_id' => $otherConnection->id,
+            'capability_key' => 'action.cache_clear',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $otherToken])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(409);
+        $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_unknown_job_cannot_be_claimed(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-unknown-token');
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/unknown-job/claim');
+
+        $response->assertStatus(404)->assertJsonPath('error.code', 'not_found');
+        $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+        $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_claiming_job_does_not_create_second_operation_attempt(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-attempt-count-token');
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim');
+
+        $response->assertStatus(200);
+        $this->assertDatabaseCount('operation_attempts', 1);
+        $this->assertSame(1, $attempt->fresh()->attempt_number);
+    }
+
+    public function test_successful_claim_records_job_claimed_audit_event(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-audit-token');
+
+        $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+            ->postJson('/api/v1/connector/jobs/' . $jobId . '/claim')
+            ->assertStatus(200);
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'job_claimed',
+            'target_type' => 'operation',
+            'target_id' => $attempt->operation_id,
+        ]);
+    }
+
     private function createClaimedJob(string $token = 'site-a-token'): array
     {
         [$user, $organization, $site] = $this->createUserWithSite();
@@ -781,6 +996,7 @@ class OperationTest extends TestCase
     {
         $lock = \Mockery::mock(MaintenanceLock::class);
         $lock->shouldReceive('acquire')->andReturn(true);
+        $lock->shouldReceive('release')->andReturn(true);
 
         return $lock;
     }
