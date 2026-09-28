@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Requests\ConnectorHeartbeatRequest;
 use App\Http\Requests\ConnectorRegisterRequest;
 use App\Http\Requests\ConnectorSubmitResultRequest;
+use App\Http\Requests\ConnectorSubmitStateRequest;
 use App\Http\Requests\ConnectorTelemetryRequest;
 use App\Models\HealthCheck;
 use App\Models\Operation;
@@ -15,6 +16,7 @@ use App\Services\MaintenanceLock;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class ConnectorController extends BaseController
 {
@@ -326,6 +328,7 @@ class ConnectorController extends BaseController
                 'operation_id' => $attempt->operation_id,
                 'operation_attempt_id' => $attempt->id,
                 'connector_job_id' => $jobId,
+                'verification_status' => OperationResult::VERIFICATION_PENDING,
                 'result_status' => $validated['status'] === 'success' ? 'success' : 'failed',
                 'cache_cleared_at' => $validated['cache_cleared_at'] ?? null,
                 'cleared_types' => $validated['cleared_types'] ?? null,
@@ -378,6 +381,114 @@ class ConnectorController extends BaseController
             'error_code' => $result->error_code,
             'error_message' => $result->error_message,
         ]);
+    }
+
+    public function submitState(ConnectorSubmitStateRequest $request, string $jobId)
+    {
+        /** @var SiteConnection $connection */
+        $connection = $request->attributes->get('connector_connection');
+        $attempt = OperationAttempt::where('connector_job_id', $jobId)
+            ->whereHas('operation.site', fn ($query) => $query->where('id', $connection->site_id))
+            ->whereHas('operation', fn ($query) => $query->where('operation_type', 'action.cache_clear'))
+            ->first();
+
+        if (! $attempt) {
+            return $this->errorResponse('Job not found', 'not_found', 404);
+        }
+        $state = $request->validated();
+        $submission = DB::transaction(function () use ($attempt, $connection, $jobId, $state) {
+            $lockedConnection = SiteConnection::whereKey($connection->id)->lockForUpdate()->first();
+            if (! $lockedConnection || ! $lockedConnection->isActive()) {
+                return ['error' => ['Connector is inactive or revoked', 'unauthorized', 401]];
+            }
+            if (! $lockedConnection->capabilities()->where('capability_key', 'read.cache_state')->where('enabled', true)->exists()) {
+                return ['error' => ['Capability not granted', 'capability_denied', 403]];
+            }
+            $lockedAttempt = OperationAttempt::whereKey($attempt->id)->lockForUpdate()->firstOrFail();
+            $operation = Operation::whereKey($lockedAttempt->operation_id)->lockForUpdate()->firstOrFail();
+            $lockedResult = OperationResult::where('operation_attempt_id', $lockedAttempt->id)->lockForUpdate()->first();
+
+            if ($lockedAttempt->connector_job_id !== $jobId) {
+                return ['error' => ['Job not found', 'not_found', 404]];
+            }
+            if ($operation->isTerminal()) {
+                return ['error' => ['Operation already terminal', 'already_terminal', 409]];
+            }
+            if ($lockedAttempt->claimed_by_connection_id !== $connection->id) {
+                return ['error' => ['Job is not claimed by this connector', 'not_claimed', 409]];
+            }
+            if ($lockedAttempt->status !== OperationAttempt::STATUS_RESULT_RECEIVED) {
+                return ['error' => ['Attempt is not awaiting verification state', 'invalid_state', 409]];
+            }
+            if ($operation->status !== Operation::STATUS_VERIFICATION_PENDING) {
+                return ['error' => ['Operation is not awaiting verification', 'invalid_state', 409]];
+            }
+            if (! $lockedResult) {
+                return ['error' => ['Connector action result is required first', 'result_required', 409]];
+            }
+            if ($lockedResult->verification_status !== OperationResult::VERIFICATION_PENDING) {
+                return ['error' => ['Verification is not pending', 'verification_terminal', 409]];
+            }
+            if ($lockedResult->actual_state_json !== null) {
+                if (! $this->sameState($lockedResult->actual_state_json, $state)) {
+                    return ['error' => ['Conflicting authoritative state submission', 'already_submitted', 409]];
+                }
+
+                return ['created' => false];
+            }
+
+            $lockedResult->update([
+                'actual_state_json' => $state,
+                'verification_error' => null,
+                'verified_at' => null,
+            ]);
+
+            return ['created' => true];
+        });
+
+        if (isset($submission['error'])) {
+            return $this->errorResponse(...$submission['error']);
+        }
+
+        try {
+            \App\Jobs\VerifyOperationAttempt::dispatch($attempt->id);
+        } catch (Throwable $exception) {
+            try {
+                (new \Illuminate\Bus\UniqueLock(app(\Illuminate\Contracts\Cache\Repository::class)))
+                    ->release(new \App\Jobs\VerifyOperationAttempt($attempt->id));
+            } catch (Throwable) {
+                // A later identical submission can retry once the queue/cache is available.
+            }
+            report($exception);
+
+            return $this->errorResponse('Verification could not be queued; retry the same state submission.', 'verification_enqueue_failed', 503);
+        }
+
+        return $this->successResponse(
+            ['job_id' => $jobId, 'verification_status' => OperationResult::VERIFICATION_PENDING],
+            [],
+            $submission['created'] ? 202 : 200
+        );
+    }
+
+    private function sameState(?array $stored, array $submitted): bool
+    {
+        if ($stored === null) {
+            return false;
+        }
+        return json_encode($this->canonicalState($stored)) === json_encode($this->canonicalState($submitted));
+    }
+
+    private function canonicalState(array $state): array
+    {
+        ksort($state);
+        foreach ($state as $key => $value) {
+            if (is_array($value) && ! array_is_list($value)) {
+                $state[$key] = $this->canonicalState($value);
+            }
+        }
+
+        return $state;
     }
 
     private function validateResultPayload(array $data): void

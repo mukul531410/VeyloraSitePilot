@@ -44,6 +44,7 @@ Examples:
 - action.theme_update
 - action.core_update
 - action.cache_clear
+- read.cache_state
 - action.backup
 - action.maintenance_mode
 
@@ -66,7 +67,11 @@ No secrets should be sent as telemetry.
 
 For remote operations:
 
-requested → authorized → queued → dispatched → accepted → executing → result_received → verified
+requested → authorized → queued → dispatched → accepted → executing → result_received → verification_pending → verified
+
+The connector's initial `result` response records its action claim; it does not prove success. Afterward, a connector with `read.cache_state` submits a live authoritative post-state to `POST /api/v1/connector/jobs/{job}/state`. The payload contains `read_at`, `cache_generation`, `cleared_types`, and `cache_state`, with optional `wp_version` and `connector_version`. It does not contain `cache_type`; SitePilot reads `target_json.cache_type` from the operation. Cache-clear creation defaults an omitted cache type to `wordpress` and rejects any other supplied value.
+
+For `cache_type: wordpress`, `cleared_types` must be exactly `object_cache`, `page_cache`, `transient_cache`, `rewrite_cache`, `file_cache`, and `opcache`. `cache_state` is an object with exactly those six keys, each mapped to the string `cleared`; missing or extra keys and any other value fail verification. `read_at` is interpreted in UTC and must be between the server's verification start time and 60 seconds after it. The endpoint accepts state only while attempt is `result_received`, operation is `verification_pending`, and verification is `pending`; these rows are locked during the transition. Accepted evidence is stored with `verification_status: pending`. Only a successful authoritative verification marks the attempt and operation succeeded. Verification failures mark the attempt and verification failed; the operation remains `verification_pending` until later retry/dead-letter orchestration is defined. An identical pending submission retries queue dispatch; verification jobs are unique per attempt while queued.
 
 Failure branches must explicitly record:
 - timeout

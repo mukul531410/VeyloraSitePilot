@@ -82,7 +82,9 @@ id, task_id nullable, site_id, operation_type, target_json, status, policy_resul
 id, operation_id, attempt_number, status, connector_job_id, started_at, finished_at, error_code, error_details_json
 
 ### operation_results
-id, operation_id, result_status, expected_state_json, actual_state_json, verification_status, result_summary, created_at
+id, operation_id, operation_attempt_id, connector_job_id, result_status, cache_cleared_at, cleared_types, cache_generation, error_code, error_message, expected_state_json, actual_state_json, verification_status, verified_at, verification_error, result_summary, created_at
+
+`actual_state_json` stores the connector's authoritative live post-state separately from the original action-result fields. `verification_status` is pending, verified, or failed; `verified_at` records processing completion and `verification_error` records a deterministic failure code.
 
 ## Automation
 ### automation_rules

@@ -34,6 +34,10 @@ Identity, Organizations, Sites, Connections, Inventory, Monitoring, Performance,
 11. APIs are versioned contracts.
 12. The WordPress test site is introduced only after connector contracts are stable.
 
+### Cache operation verification
+
+For `cache_type: wordpress`, the connector must declare `read.cache_state` to submit authoritative state at `POST /api/v1/connector/jobs/{job}/state`. The payload includes `read_at`, `cache_generation`, `cleared_types`, and `cache_state`, optionally `wp_version` and `connector_version`; it omits `cache_type`. The exact cleared type set is `object_cache`, `page_cache`, `transient_cache`, `rewrite_cache`, `file_cache`, and `opcache`. `cache_state` is an object with exactly those six keys and each value must be `cleared`. Cache-clear operation creation defaults an omitted target cache type to `wordpress` and rejects other values. State submission requires attempt `result_received`, operation `verification_pending`, and verification `pending`, guarded by row locks. `read_at` must fall within the 60-second UTC window beginning when server-side verification starts. The action result is only a connector claim. Authoritative state is stored in `operation_results.actual_state_json`; `verification_status` begins pending, while `verified_at` and `verification_error` record the outcome. Only verified state can mark the operation succeeded. An identical pending submission can retry queue dispatch, with a unique verification job per attempt. Retry and dead-letter orchestration remains deferred.
+
 ## Release strategy
 Build one vertical slice first, then expand capability by capability.
 

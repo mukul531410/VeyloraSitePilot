@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\ConnectorCapability;
 use App\Models\Operation;
 use App\Models\OperationAttempt;
+use App\Models\OperationResult;
 use App\Models\Organization;
 use App\Models\OrganizationMember;
 use App\Models\Role;
@@ -13,6 +14,7 @@ use App\Models\SiteConnection;
 use App\Models\User;
 use App\Services\MaintenanceLock;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -116,6 +118,43 @@ class OperationTest extends TestCase
             'operation_type' => 'action.cache_clear',
             'idempotency_key' => 'test-key-123',
         ]);
+    }
+
+    public function test_cache_clear_target_defaults_to_wordpress_and_rejects_other_cache_types(): void
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+
+        $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'wordpress-cache-type-default',
+        ])->assertCreated()->assertJsonPath('data.target_json.cache_type', 'wordpress');
+
+        $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'invalid-cache-type',
+            'target_json' => ['cache_type' => 'object_cache'],
+        ])->assertUnprocessable()->assertJsonValidationErrors('target_json.cache_type');
+    }
+
+    public function test_explicit_wordpress_cache_type_is_accepted_and_missing_type_defaults(): void
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+
+        $explicit = $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'explicit-wordpress-cache-type',
+            'target_json' => ['cache_type' => 'wordpress'],
+        ]);
+        $explicit->assertCreated()->assertJsonPath('data.target_json.cache_type', 'wordpress');
+
+        $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'default-wordpress-cache-type',
+        ])->assertCreated()->assertJsonPath('data.target_json.cache_type', 'wordpress');
     }
 
     public function test_cross_organization_access_is_rejected(): void
@@ -242,7 +281,7 @@ class OperationTest extends TestCase
         $payload = [
             'operation_type' => 'action.cache_clear',
             'idempotency_key' => 'idem-key-123',
-            'target_json' => ['cache_type' => 'full'],
+            'target_json' => ['cache_type' => 'wordpress'],
         ];
 
         $response1 = $this->postJson('/api/v1/sites/' . $site->id . '/operations', $payload);
@@ -256,7 +295,7 @@ class OperationTest extends TestCase
         $this->assertDatabaseCount('operations', 1);
     }
 
-    public function test_same_idempotency_key_different_request_returns_409(): void
+    public function test_cache_clear_rejects_non_wordpress_type_for_existing_idempotency_key(): void
     {
         [$user, $organization, $site] = $this->createUserWithSite();
         Sanctum::actingAs($user);
@@ -265,7 +304,7 @@ class OperationTest extends TestCase
         $response1 = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
             'operation_type' => 'action.cache_clear',
             'idempotency_key' => 'idem-conflict-key',
-            'target_json' => ['cache_type' => 'full'],
+            'target_json' => ['cache_type' => 'wordpress'],
         ]);
         $response1->assertStatus(201);
         $response2 = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
@@ -274,7 +313,8 @@ class OperationTest extends TestCase
             'target_json' => ['cache_type' => 'partial'],
         ]);
 
-        $response2->assertStatus(409)->assertJsonPath('error.code', 'idempotency_conflict');
+        $response2->assertUnprocessable()->assertJsonValidationErrors('target_json.cache_type');
+        $this->assertDatabaseCount('operations', 1);
     }
 
     public function test_same_idempotency_key_different_sites_no_collision(): void
@@ -288,14 +328,14 @@ class OperationTest extends TestCase
         $response1 = $this->postJson('/api/v1/sites/' . $site1->id . '/operations', [
             'operation_type' => 'action.cache_clear',
             'idempotency_key' => 'idem-cross-site',
-            'target_json' => ['cache_type' => 'full'],
+            'target_json' => ['cache_type' => 'wordpress'],
         ]);
         $response1->assertStatus(201);
         $operationId1 = $response1->json('data.id');
         $response2 = $this->postJson('/api/v1/sites/' . $site2->id . '/operations', [
             'operation_type' => 'action.cache_clear',
             'idempotency_key' => 'idem-cross-site',
-            'target_json' => ['cache_type' => 'full'],
+            'target_json' => ['cache_type' => 'wordpress'],
         ]);
         $response2->assertStatus(201);
         $operationId2 = $response2->json('data.id');
@@ -1120,5 +1160,219 @@ class OperationTest extends TestCase
         $secondResponse->assertStatus(200);
         $this->assertEquals($firstResponse->json('data.job_id'), $secondResponse->json('data.job_id'));
         $this->assertDatabaseCount('operation_results', 1);
+    }
+
+    public function test_authoritative_state_is_stored_pending_and_queued_for_verification(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-submit-token');
+        Queue::fake();
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+
+        $response = $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state);
+        $response->assertStatus(202)->assertJsonPath('data.verification_status', OperationResult::VERIFICATION_PENDING);
+        $this->assertEquals($state, OperationResult::firstOrFail()->actual_state_json);
+        $this->assertSame(OperationResult::VERIFICATION_PENDING, OperationResult::firstOrFail()->verification_status);
+        $this->assertSame(Operation::STATUS_VERIFICATION_PENDING, Operation::findOrFail($attempt->operation_id)->status);
+        Queue::assertPushed(\App\Jobs\VerifyOperationAttempt::class);
+        $claimResult = OperationResult::firstOrFail();
+        $this->assertSame('success', $claimResult->result_status);
+        $this->assertSame('v2', $claimResult->cache_generation);
+        $this->assertSame(['file'], $claimResult->cleared_types);
+        $this->assertSame('2026-09-24T12:00:00+00:00', $claimResult->cache_cleared_at->toIso8601String());
+        $this->assertNull($claimResult->error_code);
+        $this->assertNull($claimResult->error_message);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'result_received']);
+    }
+
+    public function test_duplicate_authoritative_state_is_idempotent_and_conflict_is_rejected(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-idempotent-token');
+        Queue::fake();
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+        $headers = ['Authorization' => 'Bearer '.$token];
+        $this->withHeaders($headers)->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(202);
+        $this->withHeaders($headers)->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertOk();
+        Queue::assertPushedTimes(\App\Jobs\VerifyOperationAttempt::class, 1);
+        $state['cache_generation'] = 'different';
+        $this->withHeaders($headers)->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
+        $this->assertDatabaseCount('operation_results', 1);
+    }
+
+    public function test_identical_pending_state_recovers_missing_queue_dispatch_without_duplicate_jobs(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-dispatch-recovery-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+        $attempt->result->update([
+            'actual_state_json' => $state,
+            'verification_status' => OperationResult::VERIFICATION_PENDING,
+        ]);
+        Queue::fake();
+
+        $headers = ['Authorization' => 'Bearer '.$token];
+        $this->withHeaders($headers)->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertOk();
+        $this->withHeaders($headers)->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertOk();
+        Queue::assertPushedTimes(\App\Jobs\VerifyOperationAttempt::class, 1);
+    }
+
+    public function test_state_submission_requires_own_claim_and_read_capability(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-capability-token');
+        Queue::fake();
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->capabilities()->where('capability_key', 'action.cache_clear')->update(['capability_key' => 'other']);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $this->authoritativeState())->assertStatus(403);
+        $this->assertNull(OperationResult::firstOrFail()->actual_state_json);
+    }
+
+    public function test_successful_verification_transitions_operation_and_attempt(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-job-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+        $state['read_at'] = now('UTC')->addSeconds(10)->toIso8601String();
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(202);
+        $attempt->refresh();
+        $this->assertSame(OperationAttempt::STATUS_SUCCEEDED, $attempt->status);
+        $this->assertSame(Operation::STATUS_SUCCEEDED, Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertSame(OperationResult::VERIFICATION_PASSED, $attempt->result->verification_status);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_started']);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_verified']);
+    }
+
+    public function test_failed_verification_fails_attempt_but_keeps_operation_pending(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-failure-job-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+        $state['cache_generation'] = 'not-v2';
+        $state['read_at'] = now('UTC')->addSeconds(10)->toIso8601String();
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(202);
+
+        $attempt->refresh();
+        $this->assertSame(OperationAttempt::STATUS_FAILED, $attempt->status);
+        $this->assertSame(OperationResult::VERIFICATION_FAILED, $attempt->result->verification_status);
+        $this->assertSame(OperationResult::VERIFICATION_ERROR_CACHE_GENERATION_MISMATCH, $attempt->result->verification_error);
+        $this->assertSame(Operation::STATUS_VERIFICATION_PENDING, Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_started']);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_failed']);
+    }
+
+    public function test_verification_job_does_not_overwrite_operation_that_became_terminal(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-terminal-job-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $attempt->result->update([
+            'actual_state_json' => $this->authoritativeState(),
+            'verification_status' => OperationResult::VERIFICATION_PENDING,
+        ]);
+        $attempt->refresh()->update(['status' => OperationAttempt::STATUS_ACCEPTED]);
+        (new \App\Jobs\VerifyOperationAttempt($attempt->id))->handle(app(\App\Services\VerificationEngine::class));
+        $attempt->refresh();
+        $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->status);
+        $this->assertSame(OperationResult::VERIFICATION_PENDING, $attempt->result->verification_status);
+
+        $attempt->update(['status' => OperationAttempt::STATUS_RESULT_RECEIVED]);
+        Operation::findOrFail($attempt->operation_id)->update(['status' => Operation::STATUS_CANCELLED]);
+
+        (new \App\Jobs\VerifyOperationAttempt($attempt->id))->handle(app(\App\Services\VerificationEngine::class));
+
+        $attempt->refresh();
+        $this->assertSame(Operation::STATUS_CANCELLED, Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertSame(OperationAttempt::STATUS_FAILED, $attempt->status);
+        $this->assertSame(OperationResult::VERIFICATION_FAILED, $attempt->result->verification_status);
+        $this->assertSame(OperationResult::VERIFICATION_ERROR_OPERATION_STATE_CHANGED, $attempt->result->verification_error);
+        $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_failed']);
+    }
+
+    public function test_state_submission_rejects_wrong_site_job_inactive_and_terminal_states(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-guard-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+
+        $attempt->refresh()->update(['status' => OperationAttempt::STATUS_ACCEPTED]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
+        $attempt->update(['status' => OperationAttempt::STATUS_RESULT_RECEIVED]);
+
+        $this->withHeaders(['Authorization' => ''])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertUnauthorized();
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/not-the-job/state', $state)->assertNotFound();
+        [, , $otherSite] = $this->createUserWithSite();
+        $otherToken = 'state-other-site-token';
+        $this->createConnectorWithToken($otherSite, $otherToken);
+        $this->withHeaders(['Authorization' => 'Bearer '.$otherToken])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertNotFound();
+        $sameSiteToken = 'state-different-connector-token';
+        $otherConnection = $this->createConnectorWithToken($site, $sameSiteToken);
+        ConnectorCapability::create([
+            'site_connection_id' => $otherConnection->id,
+            'capability_key' => 'read.cache_state',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$sameSiteToken])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
+
+        Operation::findOrFail($attempt->operation_id)->update(['status' => Operation::STATUS_SUCCEEDED]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
+        Operation::findOrFail($attempt->operation_id)->update(['status' => Operation::STATUS_VERIFICATION_PENDING]);
+        $attempt->result->update(['verification_status' => OperationResult::VERIFICATION_PASSED]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
+        $attempt->result->update(['verification_status' => null]);
+
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        $connection->update(['status' => 'inactive']);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertUnauthorized();
+        $connection->update(['status' => 'active']);
+        $connection->revoke();
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertUnauthorized();
+    }
+
+    private function authoritativeState(): array
+    {
+        return [
+            'read_at' => now('UTC')->addSeconds(10)->toIso8601String(),
+            'cache_generation' => 'v2',
+            'cleared_types' => [
+                'object_cache', 'page_cache', 'transient_cache', 'rewrite_cache', 'file_cache', 'opcache',
+            ],
+            'cache_state' => [
+                'object_cache' => 'cleared',
+                'page_cache' => 'cleared',
+                'transient_cache' => 'cleared',
+                'rewrite_cache' => 'cleared',
+                'file_cache' => 'cleared',
+                'opcache' => 'cleared',
+            ],
+            'wp_version' => '6.8',
+            'connector_version' => '1.0.0',
+        ];
+    }
+
+    private function grantCacheStateRead(Site $site): void
+    {
+        $connection = SiteConnection::where('site_id', $site->id)->firstOrFail();
+        ConnectorCapability::create([
+            'site_connection_id' => $connection->id,
+            'capability_key' => 'read.cache_state',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
     }
 }

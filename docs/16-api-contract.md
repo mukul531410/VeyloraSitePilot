@@ -108,7 +108,12 @@ GET /connector/capabilities
 POST /connector/inventory
 POST /connector/telemetry
 POST /connector/jobs/{job}/result
+POST /connector/jobs/{job}/state
 GET /connector/jobs
+
+`POST /connector/jobs/{job}/state` requires an authenticated active connector that owns the site and claimed the job, with the enabled `read.cache_state` capability. It accepts state only when the attempt is `result_received`, the operation is `verification_pending`, and verification is `pending`; the attempt, operation, and result rows are locked for the transition. The authoritative JSON body requires `read_at`, `cache_generation`, `cleared_types`, and `cache_state`; `wp_version` and `connector_version` are optional. The connector does not send `cache_type`; SitePilot uses `target_json.cache_type`, which defaults to `wordpress` for cache-clear operations and rejects other values. For WordPress, `cleared_types` is exactly `object_cache`, `page_cache`, `transient_cache`, `rewrite_cache`, `file_cache`, and `opcache`. `cache_state` must be an object with exactly those six keys, each mapped to `cleared`. The server verifies that `read_at` is no earlier than verification processing start and no later than 60 seconds after it (UTC).
+
+Accepted state evidence is persisted in `operation_results.actual_state_json` with `verification_status: pending`. `verified_at` and `verification_error` record the eventual outcome. An action result alone never succeeds an operation; only authoritative verification can transition it to succeeded. Conflicting duplicate state is HTTP 409. An identical pending duplicate retries verification-job dispatch; the job is unique per attempt while queued. A queue failure returns HTTP 503 and the connector can retry the identical state.
 
 The exact registration handshake and signed-request scheme are defined in the connector specification.
 
