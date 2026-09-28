@@ -41,16 +41,23 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
 
         try {
             DB::transaction(function () use ($maintenanceLock, $policyEngine, &$lock) {
-                $operation = Operation::with(['site', 'site.organization'])
-                    ->whereKey($this->operationId)
+                $operation = Operation::whereKey($this->operationId)
+                    ->lockForUpdate()
                     ->firstOrFail();
+
+                $operation->load(['site', 'site.organization']);
 
                 if ($operation->operation_type !== 'action.cache_clear') {
                     throw new RuntimeException('Unsupported operation type: ' . $operation->operation_type);
                 }
 
-                if ($operation->status !== Operation::STATUS_QUEUED) {
+                if ($operation->isTerminal() || $operation->status !== Operation::STATUS_QUEUED) {
                     return;
+                }
+
+                $attemptCount = $operation->attempts()->count();
+                if ($attemptCount >= (int) $operation->max_attempts) {
+                    throw new RuntimeException('Maximum attempts reached for operation ' . $operation->id);
                 }
 
                 $site = $operation->site;
@@ -65,8 +72,7 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
                     throw new RuntimeException('Capability not granted: ' . $operation->operation_type);
                 }
 
-                $attemptNumber = $operation->attempts()->max('attempt_number') ?? 0;
-                $attemptNumber++;
+                $attemptNumber = ((int) ($operation->attempts()->max('attempt_number') ?? 0)) + 1;
 
                 $connectorJobId = (string) Str::ulid();
                 $lockToken = $operation->id . ':' . $attemptNumber;

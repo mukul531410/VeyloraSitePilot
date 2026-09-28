@@ -89,6 +89,7 @@ class OperationsController extends BaseController
             'policy_result' => $operation->policy_result,
             'approval_required' => $operation->approval_required,
             'idempotency_key' => $operation->idempotency_key,
+            'max_attempts' => $operation->max_attempts,
             'requested_by' => $operation->requested_by,
             'started_at' => $operation->started_at?->toIso8601String(),
             'finished_at' => $operation->finished_at?->toIso8601String(),

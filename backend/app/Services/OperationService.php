@@ -96,7 +96,7 @@ class OperationService
                 $this->createApprovalRequest($operation, $user);
             }
 
-            return $operation;
+            return $operation->refresh();
         });
     }
 

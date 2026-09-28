@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Operation;
 use App\Models\OperationAttempt;
 use App\Models\OperationResult;
+use App\Services\OperationRetryClassifier;
 use App\Services\VerificationEngine;
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
@@ -29,9 +30,10 @@ class VerifyOperationAttempt implements ShouldQueue, ShouldBeUnique
         return 'verify-operation-attempt:'.$this->attemptId;
     }
 
-    public function handle(VerificationEngine $engine): void
+    public function handle(VerificationEngine $engine, ?OperationRetryClassifier $retryClassifier = null): void
     {
-        DB::transaction(function () use ($engine) {
+        $retryClassifier ??= app(OperationRetryClassifier::class);
+        DB::transaction(function () use ($engine, $retryClassifier) {
             $attempt = OperationAttempt::whereKey($this->attemptId)->lockForUpdate()->firstOrFail();
             $operation = Operation::whereKey($attempt->operation_id)->lockForUpdate()->firstOrFail();
             $result = OperationResult::where('operation_attempt_id', $attempt->id)->lockForUpdate()->first();
@@ -46,7 +48,7 @@ class VerifyOperationAttempt implements ShouldQueue, ShouldBeUnique
             $this->audit($attempt, 'verification_started', $connectionId, ['verification_started_at' => $startedAt->toIso8601String()]);
 
             if ($operation->status !== Operation::STATUS_VERIFICATION_PENDING) {
-                $this->failVerification($attempt, $result, OperationResult::VERIFICATION_ERROR_OPERATION_STATE_CHANGED, $connectionId);
+                $this->failVerification($attempt, $result, OperationResult::VERIFICATION_ERROR_OPERATION_STATE_CHANGED, $connectionId, $retryClassifier);
 
                 return;
             }
@@ -65,23 +67,30 @@ class VerifyOperationAttempt implements ShouldQueue, ShouldBeUnique
                 $attempt->operation->update(['status' => Operation::STATUS_SUCCEEDED, 'finished_at' => now('UTC')]);
                 $this->audit($attempt, 'verification_verified', $connectionId, ['verification_status' => OperationResult::VERIFICATION_PASSED]);
             } else {
-                $this->failVerification($attempt, $result, $outcome['error'], $connectionId);
+                $this->failVerification($attempt, $result, $outcome['error'], $connectionId, $retryClassifier);
             }
         });
     }
 
-    private function failVerification(OperationAttempt $attempt, OperationResult $result, string $error, ?string $connectionId): void
+    private function failVerification(
+        OperationAttempt $attempt,
+        OperationResult $result,
+        string $error,
+        ?string $connectionId,
+        OperationRetryClassifier $retryClassifier,
+    ): void
     {
         $result->update([
             'verification_status' => OperationResult::VERIFICATION_FAILED,
             'verification_error' => $error,
             'verified_at' => now('UTC'),
         ]);
-        $attempt->update([
-            'status' => OperationAttempt::STATUS_FAILED,
-            'error_code' => $error,
-            'finished_at' => now('UTC'),
-        ]);
+        $attemptChanges = ['error_code' => $error];
+        if ($retryClassifier->classifyVerificationError($error) === OperationRetryClassifier::NON_RETRYABLE) {
+            $attemptChanges['status'] = OperationAttempt::STATUS_FAILED;
+            $attemptChanges['finished_at'] = now('UTC');
+        }
+        $attempt->update($attemptChanges);
         $this->audit($attempt, 'verification_failed', $connectionId, [
             'verification_status' => OperationResult::VERIFICATION_FAILED,
             'verification_error' => $error,

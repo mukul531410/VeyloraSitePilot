@@ -57,6 +57,7 @@ class Operation extends Model
         'policy_result',
         'approval_required',
         'idempotency_key',
+        'max_attempts',
         'requested_by',
         'started_at',
         'finished_at',
@@ -65,6 +66,7 @@ class Operation extends Model
     protected $casts = [
         'target_json' => 'array',
         'approval_required' => 'boolean',
+        'max_attempts' => 'integer',
         'started_at' => 'datetime',
         'finished_at' => 'datetime',
     ];

@@ -64,6 +64,18 @@ Process:
 
 ## 4. Retry algorithm
 
+### Implemented foundation (Checkpoint 2D-1)
+
+- `operations.max_attempts` is the stored attempt cap (default 3); dispatch reads that value.
+- Dispatch locks the operation row while checking queued/terminal state, counting attempts, allocating the next number, creating the attempt, and changing operation state.
+- `(operation_id, attempt_number)` is unique. This protects allocation at the database boundary as well.
+- Retry classification is deterministic only; this checkpoint does not schedule retries.
+- An unclaimed `dispatched` attempt is safe to replay under the claim-before-execute connector contract. An `accepted`, `executing`, or `result_received` attempt without conclusive evidence is unknown and must not repeat the mutation.
+- Existing pending authoritative evidence may be reprocessed as verification only; it does not create a new mutation attempt.
+- `cache_error` is deterministic evidence that cache clearing did not complete; malformed, stale, future, missing, or conflicting evidence is uncertainty, not proof of mutation failure.
+
+### Planned later
+
 Retry only when:
 - failure is classified retryable;
 - operation is idempotent or has a safe idempotency key;
@@ -73,6 +85,8 @@ Retry only when:
 Use exponential backoff with jitter.
 
 Never blindly retry destructive or unknown-state operations.
+
+Timeout scheduling, automatic retry, operator retry, unknown resolution, and dead-letter transitions are not implemented by Checkpoint 2D-1.
 
 ## 5. Incident algorithm
 

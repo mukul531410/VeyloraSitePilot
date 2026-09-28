@@ -74,7 +74,7 @@ GET /operations
 POST /operations
 GET /operations/{operation}
 POST /operations/{operation}/cancel
-POST /operations/{operation}/retry
+POST /operations/{operation}/retry (planned; not implemented)
 
 ### Automation
 GET /automation/rules

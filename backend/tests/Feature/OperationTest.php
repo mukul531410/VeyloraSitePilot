@@ -111,6 +111,7 @@ class OperationTest extends TestCase
                 'request_id',
             ])
             ->assertJsonPath('data.operation_type', 'action.cache_clear')
+            ->assertJsonPath('data.max_attempts', 3)
             ->assertJsonPath('data.idempotency_key', 'test-key-123');
 
         $this->assertDatabaseHas('operations', [
@@ -617,6 +618,27 @@ class OperationTest extends TestCase
         $this->assertDatabaseCount('operation_attempts', 1);
     }
 
+    public function test_failed_maintenance_lock_rolls_back_attempt_and_operation_transition(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $lock = \Mockery::mock(MaintenanceLock::class);
+        $lock->shouldReceive('acquire')->once()->andReturn(false);
+        $lock->shouldNotReceive('release');
+
+        try {
+            (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+                $lock,
+                $this->app->make(\App\Services\PolicyEngine::class),
+            );
+            $this->fail('Expected a failed maintenance lock acquisition to abort dispatch.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Could not acquire maintenance lock', $exception->getMessage());
+        }
+
+        $this->assertSame(0, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(Operation::STATUS_QUEUED, $operation->fresh()->status);
+    }
+
     public function test_claiming_job_releases_maintenance_lock_after_claim(): void
     {
         [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-lock-release-token');
@@ -644,6 +666,147 @@ class OperationTest extends TestCase
         $job->handle($maintenanceLock, $policyEngine);
 
         $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_dispatching_after_attempt_one_allocates_attempt_two_with_a_new_connector_job_id(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $firstJobId = (string) \Illuminate\Support\Str::ulid();
+        OperationAttempt::create([
+            'operation_id' => $operation->id,
+            'attempt_number' => 1,
+            'status' => OperationAttempt::STATUS_TIMEOUT,
+            'connector_job_id' => $firstJobId,
+        ]);
+        $operation->update(['status' => Operation::STATUS_QUEUED]);
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $this->app->make(MaintenanceLock::class),
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+
+        $attempts = OperationAttempt::where('operation_id', $operation->id)->orderBy('attempt_number')->get();
+        $this->assertSame([1, 2], $attempts->pluck('attempt_number')->all());
+        $this->assertNotSame($firstJobId, $attempts[1]->connector_job_id);
+        $this->assertSame(Operation::STATUS_RUNNING, $operation->fresh()->status);
+    }
+
+    public function test_dispatch_uses_non_default_stored_max_attempts_value(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $operation->update(['max_attempts' => 2, 'status' => Operation::STATUS_QUEUED]);
+        $maintenanceLock = $this->getFakeMaintenanceLock();
+        $policyEngine = $this->app->make(\App\Services\PolicyEngine::class);
+
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle($maintenanceLock, $policyEngine);
+        $operation->refresh()->update(['status' => Operation::STATUS_QUEUED]);
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle($maintenanceLock, $policyEngine);
+
+        $attempts = OperationAttempt::where('operation_id', $operation->id)->orderBy('attempt_number')->get();
+        $this->assertSame(2, $operation->fresh()->max_attempts);
+        $this->assertSame(2, $attempts->count());
+        $this->assertSame([1, 2], $attempts->pluck('attempt_number')->all());
+
+        $operation->refresh()->update(['status' => Operation::STATUS_QUEUED]);
+        try {
+            (new \App\Jobs\DispatchOperationJob($operation->id))->handle($maintenanceLock, $policyEngine);
+            $this->fail('Expected dispatch to honor the stored max_attempts value of 2.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Maximum attempts reached', $exception->getMessage());
+        }
+
+        $this->assertSame(2, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(2, $operation->fresh()->max_attempts);
+    }
+
+    public function test_dispatch_blocks_attempt_four_when_stored_max_attempts_is_exhausted(): void
+    {
+        $operation = $this->createQueuedOperation();
+        $operation->update(['max_attempts' => 3, 'status' => Operation::STATUS_QUEUED]);
+        foreach ([1, 2, 3] as $number) {
+            OperationAttempt::create([
+                'operation_id' => $operation->id,
+                'attempt_number' => $number,
+                'status' => OperationAttempt::STATUS_TIMEOUT,
+                'connector_job_id' => (string) \Illuminate\Support\Str::ulid(),
+            ]);
+        }
+
+        try {
+            (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+                $this->getFakeMaintenanceLock(),
+                $this->app->make(\App\Services\PolicyEngine::class),
+            );
+            $this->fail('Expected dispatch to block after the stored max_attempts limit.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Maximum attempts reached', $exception->getMessage());
+        }
+
+        $this->assertSame(3, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(Operation::STATUS_QUEUED, $operation->fresh()->status);
+    }
+
+    public function test_terminal_operation_never_receives_an_attempt(): void
+    {
+        foreach ([
+            Operation::STATUS_SUCCEEDED,
+            Operation::STATUS_FAILED,
+            Operation::STATUS_UNKNOWN,
+            Operation::STATUS_CANCELLED,
+            Operation::STATUS_DEAD_LETTER,
+        ] as $status) {
+            $operation = $this->createQueuedOperation();
+            $operation->update(['status' => $status]);
+
+            (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+                $this->getFakeMaintenanceLock(),
+                $this->app->make(\App\Services\PolicyEngine::class),
+            );
+
+            $this->assertSame(0, OperationAttempt::where('operation_id', $operation->id)->count(), $status);
+        }
+    }
+
+    public function test_attempt_number_and_connector_job_id_uniqueness_constraints_exist(): void
+    {
+        $indexes = \Illuminate\Support\Facades\DB::select("PRAGMA index_list('operation_attempts')");
+        $attemptIndex = collect($indexes)->first(fn ($index) => $index->name === 'operation_attempts_operation_id_attempt_number_unique');
+        $this->assertNotNull($attemptIndex);
+        $this->assertSame(1, (int) $attemptIndex->unique);
+
+        $operation = $this->createQueuedOperation();
+        $jobId = (string) \Illuminate\Support\Str::ulid();
+        OperationAttempt::create(['operation_id' => $operation->id, 'attempt_number' => 1, 'status' => 'dispatched', 'connector_job_id' => $jobId]);
+
+        try {
+            OperationAttempt::create(['operation_id' => $operation->id, 'attempt_number' => 1, 'status' => 'dispatched', 'connector_job_id' => (string) \Illuminate\Support\Str::ulid()]);
+            $this->fail('Expected duplicate attempt number to violate the unique constraint.');
+        } catch (\Illuminate\Database\QueryException) {
+            $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+        }
+
+        try {
+            OperationAttempt::create(['operation_id' => $operation->id, 'attempt_number' => 2, 'status' => 'dispatched', 'connector_job_id' => $jobId]);
+            $this->fail('Expected duplicate connector job ID to violate its existing unique constraint.');
+        } catch (\Illuminate\Database\QueryException) {
+            $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+        }
+    }
+
+    public function test_unrelated_operations_can_dispatch_independently(): void
+    {
+        $first = $this->createQueuedOperation();
+        $second = $this->createQueuedOperation();
+        $lock = $this->getFakeMaintenanceLock();
+        $policyEngine = $this->app->make(\App\Services\PolicyEngine::class);
+
+        (new \App\Jobs\DispatchOperationJob($first->id))->handle($lock, $policyEngine);
+        (new \App\Jobs\DispatchOperationJob($second->id))->handle($lock, $policyEngine);
+
+        $this->assertSame([1, 1], OperationAttempt::whereIn('operation_id', [$first->id, $second->id])->orderBy('operation_id')->pluck('attempt_number')->all());
+        $this->assertSame(Operation::STATUS_RUNNING, $first->fresh()->status);
+        $this->assertSame(Operation::STATUS_RUNNING, $second->fresh()->status);
     }
 
     public function test_dispatching_pending_approval_operation_does_not_create_attempt(): void
@@ -1252,7 +1415,7 @@ class OperationTest extends TestCase
         $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_verified']);
     }
 
-    public function test_failed_verification_fails_attempt_but_keeps_operation_pending(): void
+    public function test_uncertain_verification_failure_does_not_mark_remote_attempt_failed(): void
     {
         [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-failure-job-token');
         $this->grantCacheStateRead($site);
@@ -1264,12 +1427,30 @@ class OperationTest extends TestCase
         $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(202);
 
         $attempt->refresh();
-        $this->assertSame(OperationAttempt::STATUS_FAILED, $attempt->status);
+        $this->assertSame(OperationAttempt::STATUS_RESULT_RECEIVED, $attempt->status);
         $this->assertSame(OperationResult::VERIFICATION_FAILED, $attempt->result->verification_status);
         $this->assertSame(OperationResult::VERIFICATION_ERROR_CACHE_GENERATION_MISMATCH, $attempt->result->verification_error);
         $this->assertSame(Operation::STATUS_VERIFICATION_PENDING, Operation::findOrFail($attempt->operation_id)->status);
         $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_started']);
         $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_failed']);
+    }
+
+    public function test_deterministic_cache_error_marks_attempt_failed_without_failing_operation_aggregate(): void
+    {
+        [$site, $attempt, $jobId, $token] = $this->createClaimedJob('state-cache-error-job-token');
+        $this->grantCacheStateRead($site);
+        Operation::findOrFail($attempt->operation_id)->update(['target_json' => ['cache_type' => 'wordpress']]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/result', $this->successPayload())->assertOk();
+        $state = $this->authoritativeState();
+        $state['read_at'] = now('UTC')->addSeconds(10)->toIso8601String();
+        $state['cache_state']['page_cache'] = 'error';
+        $this->withHeaders(['Authorization' => 'Bearer '.$token])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(202);
+
+        $attempt->refresh();
+        $this->assertSame(OperationAttempt::STATUS_FAILED, $attempt->status);
+        $this->assertSame('cache_error', $attempt->error_code);
+        $this->assertSame(OperationResult::VERIFICATION_FAILED, $attempt->result->verification_status);
+        $this->assertSame(Operation::STATUS_VERIFICATION_PENDING, Operation::findOrFail($attempt->operation_id)->status);
     }
 
     public function test_verification_job_does_not_overwrite_operation_that_became_terminal(): void
@@ -1295,7 +1476,7 @@ class OperationTest extends TestCase
 
         $attempt->refresh();
         $this->assertSame(Operation::STATUS_CANCELLED, Operation::findOrFail($attempt->operation_id)->status);
-        $this->assertSame(OperationAttempt::STATUS_FAILED, $attempt->status);
+        $this->assertSame(OperationAttempt::STATUS_RESULT_RECEIVED, $attempt->status);
         $this->assertSame(OperationResult::VERIFICATION_FAILED, $attempt->result->verification_status);
         $this->assertSame(OperationResult::VERIFICATION_ERROR_OPERATION_STATE_CHANGED, $attempt->result->verification_error);
         $this->assertDatabaseHas('audit_logs', ['target_id' => $attempt->operation_id, 'action' => 'verification_failed']);
