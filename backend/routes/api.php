@@ -1,12 +1,12 @@
 <?php
 
-use App\Http\Controllers\Api\OrganizationController;
-use App\Http\Controllers\Api\SiteController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ConnectorController;
-use App\Http\Controllers\Api\SiteConnectionController;
-use App\Http\Controllers\Api\SiteMonitoringController;
 use App\Http\Controllers\Api\OperationsController;
+use App\Http\Controllers\Api\OrganizationController;
+use App\Http\Controllers\Api\SiteConnectionController;
+use App\Http\Controllers\Api\SiteController;
+use App\Http\Controllers\Api\SiteMonitoringController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function (): void {
@@ -50,6 +50,7 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/sites/{site}/operations', [OperationsController::class, 'store']);
         Route::get('/sites/{site}/operations/{operation}', [OperationsController::class, 'show']);
         Route::post('/operations/{operation}/retry', [OperationsController::class, 'retry']);
+        Route::post('/operations/{operation}/resolve-unknown', [OperationsController::class, 'resolveUnknown']);
     });
 
     Route::middleware('connector')->group(function (): void {

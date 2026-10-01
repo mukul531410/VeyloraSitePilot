@@ -17,6 +17,7 @@ use App\Models\User;
 use App\Services\OperationRecoveryAuthorization;
 use App\Services\OperationRecoveryPreconditions;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class OperationRecoveryPreconditionsTest extends TestCase
@@ -107,7 +108,8 @@ class OperationRecoveryPreconditionsTest extends TestCase
             Operation::STATUS_UNKNOWN,
             Operation::STATUS_CANCELLED,
         ] as $status) {
-            $operation->update(['status' => $status]);
+            DB::table('operations')->where('id', $operation->id)->update(['status' => $status]);
+            $operation->refresh();
             $this->assertRecoveryReason($actor, $operation, OperationRecoveryException::SOURCE_NOT_DEAD_LETTER, $status);
         }
     }
@@ -221,7 +223,7 @@ class OperationRecoveryPreconditionsTest extends TestCase
             'target_json' => ['cache_type' => 'wordpress'],
             'status' => Operation::STATUS_DEAD_LETTER,
             'approval_required' => false,
-            'idempotency_key' => 'foreign-' . str()->ulid(),
+            'idempotency_key' => 'foreign-'.str()->ulid(),
             'max_attempts' => 1,
             'requested_by' => $actor->id,
         ]);
@@ -254,7 +256,7 @@ class OperationRecoveryPreconditionsTest extends TestCase
             'target_json' => ['cache_type' => 'wordpress'],
             'status' => Operation::STATUS_DEAD_LETTER,
             'approval_required' => false,
-            'idempotency_key' => 'recovery-' . str()->ulid(),
+            'idempotency_key' => 'recovery-'.str()->ulid(),
             'max_attempts' => $maxAttempts,
             'requested_by' => $actor->id,
         ]);
@@ -294,7 +296,7 @@ class OperationRecoveryPreconditionsTest extends TestCase
     {
         try {
             app(OperationRecoveryPreconditions::class)->assess($actor, $operation);
-            $this->fail('Expected recovery to fail: ' . $reason . ($message === '' ? '' : " ({$message})"));
+            $this->fail('Expected recovery to fail: '.$reason.($message === '' ? '' : " ({$message})"));
         } catch (OperationRecoveryException $exception) {
             $this->assertSame($reason, $exception->reason, $message);
         }

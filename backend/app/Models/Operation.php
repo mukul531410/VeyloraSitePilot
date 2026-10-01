@@ -14,15 +14,25 @@ class Operation extends Model
     use HasFactory, HasUlids;
 
     public const STATUS_REQUESTED = 'requested';
+
     public const STATUS_PENDING_APPROVAL = 'pending_approval';
+
     public const STATUS_APPROVED = 'approved';
+
     public const STATUS_QUEUED = 'queued';
+
     public const STATUS_RUNNING = 'running';
+
     public const STATUS_VERIFICATION_PENDING = 'verification_pending';
+
     public const STATUS_SUCCEEDED = 'succeeded';
+
     public const STATUS_FAILED = 'failed';
+
     public const STATUS_UNKNOWN = 'unknown';
+
     public const STATUS_CANCELLED = 'cancelled';
+
     public const STATUS_DEAD_LETTER = 'dead_letter';
 
     public const OPEN_STATUSES = [
@@ -42,10 +52,26 @@ class Operation extends Model
         self::STATUS_DEAD_LETTER,
     ];
 
+    public const RESOLUTION_SUCCESS = 'success';
+
+    public const RESOLUTION_FAILED = 'failed';
+
+    public const RESOLUTION_CANCELLED = 'cancelled';
+
+    public const RESOLUTIONS = [
+        self::RESOLUTION_SUCCESS,
+        self::RESOLUTION_FAILED,
+        self::RESOLUTION_CANCELLED,
+    ];
+
     public const SAFETY_LEVEL_READ_ONLY = 0;
+
     public const SAFETY_LEVEL_LOW_IMPACT = 1;
+
     public const SAFETY_LEVEL_MAINTENANCE = 2;
+
     public const SAFETY_LEVEL_HIGH_IMPACT = 3;
+
     public const SAFETY_LEVEL_DESTRUCTIVE = 4;
 
     protected $fillable = [
@@ -62,6 +88,10 @@ class Operation extends Model
         'requested_by',
         'started_at',
         'finished_at',
+        'resolution',
+        'resolved_at',
+        'resolved_by',
+        'resolution_reason',
     ];
 
     protected $casts = [
@@ -70,6 +100,7 @@ class Operation extends Model
         'max_attempts' => 'integer',
         'started_at' => 'datetime',
         'finished_at' => 'datetime',
+        'resolved_at' => 'datetime',
     ];
 
     public function site(): BelongsTo
@@ -80,6 +111,11 @@ class Operation extends Model
     public function requestedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'requested_by');
+    }
+
+    public function resolvedBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'resolved_by');
     }
 
     public function attempts(): HasMany
@@ -120,6 +156,11 @@ class Operation extends Model
     public function isTerminal(): bool
     {
         return in_array($this->status, self::TERMINAL_STATUSES, true);
+    }
+
+    public function isResolved(): bool
+    {
+        return $this->resolution !== null;
     }
 
     public function getSafetyLevel(): int

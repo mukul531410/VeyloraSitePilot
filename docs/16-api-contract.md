@@ -74,7 +74,10 @@ GET /operations
 POST /operations
 GET /operations/{operation}
 POST /operations/{operation}/cancel
-POST /operations/{operation}/retry (planned; not implemented)
+POST /operations/{operation}/retry
+POST /operations/{operation}/resolve-unknown
+
+`POST /operations/{operation}/resolve-unknown` requires an authenticated organization owner or admin and accepts `{ "resolution": "success|failed|cancelled", "reason": "..." }`. It is valid only for an operation in `unknown` with evidence of an accepted/executing timeout. The response includes both `status` and `resolution`: `success` records the operator disposition while status remains `unknown`; `failed` sets status `failed`; and `cancelled` sets status `cancelled`. Only authoritative remote verification can set status `succeeded`. The endpoint records an audit event without fabricating connector verification, attempts, results, or jobs. Invalid state and insufficient evidence return HTTP 409; validation errors return HTTP 422.
 
 ### Automation
 GET /automation/rules

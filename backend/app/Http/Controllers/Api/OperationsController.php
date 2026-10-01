@@ -5,14 +5,16 @@ namespace App\Http\Controllers\Api;
 use App\Exceptions\OperationPolicyDeniedException;
 use App\Exceptions\OperationRecoveryChainException;
 use App\Exceptions\OperationRecoveryException;
+use App\Exceptions\OperationUnknownResolutionException;
+use App\Http\Requests\ResolveUnknownOperationRequest;
 use App\Http\Requests\RetryOperationRequest;
 use App\Http\Requests\StoreOperationRequest;
-use App\Models\ApprovalRequest;
 use App\Models\Operation;
 use App\Models\Site;
 use App\Models\User;
 use App\Services\OperationRecoveryService;
 use App\Services\OperationService;
+use App\Services\OperationUnknownResolutionService;
 use Illuminate\Http\Request;
 use RuntimeException;
 
@@ -21,6 +23,7 @@ class OperationsController extends BaseController
     public function __construct(
         private OperationService $operationService,
         private OperationRecoveryService $operationRecoveryService,
+        private OperationUnknownResolutionService $operationUnknownResolutionService,
     ) {}
 
     public function store(StoreOperationRequest $request, Site $site)
@@ -47,12 +50,12 @@ class OperationsController extends BaseController
             );
         } catch (OperationPolicyDeniedException $e) {
             return $this->errorResponse(
-                'Operation denied: ' . $e->getMessage(),
+                'Operation denied: '.$e->getMessage(),
                 'policy_denied',
                 403,
                 ['checks' => $e->checks, 'policy_result' => $e->policyResult]
             );
-        } catch (\RuntimeException $e) {
+        } catch (RuntimeException $e) {
             if (str_contains($e->getMessage(), 'Idempotency conflict')) {
                 return $this->errorResponse('Idempotency conflict: same key with different payload', 'idempotency_conflict', 409);
             }
@@ -135,6 +138,46 @@ class OperationsController extends BaseController
         }
     }
 
+    public function resolveUnknown(ResolveUnknownOperationRequest $request, string $operation)
+    {
+        /** @var User $actor */
+        $actor = $request->user();
+        $source = Operation::query()
+            ->whereKey($operation)
+            ->whereHas('site', function ($siteQuery) use ($actor): void {
+                $siteQuery->where('status', 'active')
+                    ->whereHas('organization', function ($organizationQuery) use ($actor): void {
+                        $organizationQuery->where('status', 'active')
+                            ->whereHas('members', function ($memberQuery) use ($actor): void {
+                                $memberQuery->where('user_id', $actor->id)
+                                    ->where('status', 'active');
+                            });
+                    });
+            })
+            ->first();
+
+        if ($source === null) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        try {
+            $resolved = $this->operationUnknownResolutionService->resolve(
+                $actor,
+                $source,
+                $request->validated('resolution'),
+                $request->validated('reason'),
+                $request->header('X-Request-ID'),
+                $source->site,
+            );
+
+            $resolved->load(['latestAttempt', 'result', 'approvalRequest']);
+
+            return $this->successResponse($this->transformOperation($resolved));
+        } catch (OperationUnknownResolutionException $exception) {
+            return $this->unknownResolutionExceptionResponse($exception);
+        }
+    }
+
     protected function userCanAccessSite(Request $request, Site $site): bool
     {
         return $request->user()
@@ -157,6 +200,10 @@ class OperationsController extends BaseController
             'idempotency_key' => $operation->idempotency_key,
             'max_attempts' => $operation->max_attempts,
             'requested_by' => $operation->requested_by,
+            'resolution' => $operation->resolution,
+            'resolved_at' => $operation->resolved_at?->toIso8601String(),
+            'resolved_by' => $operation->resolved_by,
+            'resolution_reason' => $operation->resolution_reason,
             'started_at' => $operation->started_at?->toIso8601String(),
             'finished_at' => $operation->finished_at?->toIso8601String(),
             'created_at' => $operation->created_at?->toIso8601String(),
@@ -262,6 +309,76 @@ class OperationsController extends BaseController
         return $this->errorResponse(
             'Recovery source or lineage is not eligible',
             'recovery_precondition_failed',
+            409,
+            ['reason' => $exception->reason],
+        );
+    }
+
+    private function unknownResolutionExceptionResponse(OperationUnknownResolutionException $exception)
+    {
+        if (in_array($exception->reason, [
+            OperationUnknownResolutionException::UNAUTHORIZED_ACTOR,
+            OperationUnknownResolutionException::INACTIVE_USER,
+            OperationUnknownResolutionException::INACTIVE_MEMBERSHIP,
+            OperationUnknownResolutionException::INACTIVE_ORGANIZATION,
+            OperationUnknownResolutionException::INACTIVE_SITE,
+            OperationUnknownResolutionException::WRONG_TENANT,
+        ], true)) {
+            return $this->errorResponse('Unauthorized', 'unauthorized', 403);
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::SOURCE_MISSING) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::SOURCE_NOT_UNKNOWN) {
+            return $this->errorResponse(
+                'Operation is not in unknown state',
+                'operation_not_unknown',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::ALREADY_RESOLVED) {
+            return $this->errorResponse(
+                'Operation has already been resolved',
+                'already_resolved',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::INVALID_RESOLUTION) {
+            return $this->errorResponse(
+                'Invalid resolution type',
+                'validation_error',
+                422,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::MISSING_REASON) {
+            return $this->errorResponse(
+                'Reason is required for resolution',
+                'validation_error',
+                422,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationUnknownResolutionException::EVIDENCE_MISSING) {
+            return $this->errorResponse(
+                'Insufficient evidence to resolve unknown operation',
+                'evidence_missing',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        return $this->errorResponse(
+            'Unknown resolution failed',
+            'unknown_resolution_failed',
             409,
             ['reason' => $exception->reason],
         );

@@ -73,17 +73,22 @@ Process:
 - An unclaimed `dispatched` attempt is safe to replay under the claim-before-execute connector contract. An `accepted`, `executing`, or `result_received` attempt without conclusive evidence is unknown and must not repeat the mutation.
 - Checkpoint 2D-2B automatically retries an expired `dispatched` timeout only when the classifier confirms safety, stored `max_attempts` remains, and current policy, approval, active connection, and capability checks pass. It reuses the same operation and creates the next attempt through `DispatchOperationJob`.
 - Retry scheduling is transactionally guarded by the attempt and operation locks, uses the unique attempt number constraint, and records `attempt_retry_scheduled`. Dispatch queue failure leaves the operation queued for the periodic dispatcher to recover; no attempt is counted until dispatch commits it.
-- If attempts are exhausted or a retry precondition fails, no new attempt is created and the operation remains in the existing `running` state for later recovery. Dead-letter transition is not included.
+- If attempts are exhausted, the detector moves the safe exhausted timeout to `dead_letter`; a failed retry precondition creates no new attempt.
 - Existing pending authoritative evidence may be reprocessed as verification only; it does not create a new mutation attempt.
 - `cache_error` is deterministic evidence that cache clearing did not complete; malformed, stale, future, missing, or conflicting evidence is uncertainty, not proof of mutation failure.
 - Checkpoint 2D-2A detects expired per-attempt `timeout_at` values every minute. An unclaimed `dispatched` attempt becomes retryable `timeout` and may enter the safe retry flow above; an `accepted` or `executing` attempt becomes non-retryable `timeout` and moves the running operation to `unknown`.
 - `result_received` and terminal attempts are excluded from execution-timeout detection. Timeout audits are persisted with the transition.
+- An accepted/executing timeout moves the operation to `unknown`: SitePilot cannot prove whether the remote mutation executed. Unknown is terminal for automated execution and is never automatically retried or given a recovery successor.
+
+### Unknown state resolution (Phase 2E)
+
+An owner or administrator may resolve an `unknown` operation after reviewing external evidence. The required reason and resolution (`success`, `failed`, or `cancelled`) are recorded with actor and timestamp. This is an operator disposition, not connector verification: it creates no `OperationResult`, connector job, or attempt and does not rewrite prior evidence. `success` records the operator's conclusion but keeps `status: unknown`; only authoritative remote verification can set `status: succeeded`. `failed` and `cancelled` set their matching terminal statuses. Each resolution is audited as `operation_unknown_resolved`. No status transition out of unknown is allowed except the workflow's metadata-backed failed/cancelled dispositions; successful operator resolution remains status unknown with resolution metadata.
 
 ### Planned later
 
 Use exponential backoff with jitter for later retry policy expansion. Never blindly retry destructive or unknown-state operations.
 
-Operator retry, unknown resolution, total operation timeout, and dead-letter transitions are not implemented. No retry or recovery endpoint is exposed through the public API.
+Unknown resolution is exposed through `POST /api/v1/operations/{operation}/resolve-unknown`; dead-letter recovery is exposed through the operation retry endpoint.
 
 ## 5. Incident algorithm
 
