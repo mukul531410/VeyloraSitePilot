@@ -21,6 +21,8 @@ class OperationAttempt extends Model
     public const STATUS_TIMEOUT = 'timeout';
     public const STATUS_REJECTED = 'rejected';
 
+    public const ERROR_TIMEOUT = 'attempt_timeout';
+
     public const TERMINAL_STATUSES = [
         self::STATUS_SUCCEEDED,
         self::STATUS_FAILED,

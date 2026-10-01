@@ -64,29 +64,26 @@ Process:
 
 ## 4. Retry algorithm
 
-### Implemented foundation (Checkpoint 2D-1)
+### Implemented foundation and safe retry (Checkpoints 2D-1 through 2D-2B)
 
 - `operations.max_attempts` is the stored attempt cap (default 3); dispatch reads that value.
 - Dispatch locks the operation row while checking queued/terminal state, counting attempts, allocating the next number, creating the attempt, and changing operation state.
 - `(operation_id, attempt_number)` is unique. This protects allocation at the database boundary as well.
-- Retry classification is deterministic only; this checkpoint does not schedule retries.
+- `OperationRetryClassifier` classifies attempt and verification outcomes; it does not enqueue work itself.
 - An unclaimed `dispatched` attempt is safe to replay under the claim-before-execute connector contract. An `accepted`, `executing`, or `result_received` attempt without conclusive evidence is unknown and must not repeat the mutation.
+- Checkpoint 2D-2B automatically retries an expired `dispatched` timeout only when the classifier confirms safety, stored `max_attempts` remains, and current policy, approval, active connection, and capability checks pass. It reuses the same operation and creates the next attempt through `DispatchOperationJob`.
+- Retry scheduling is transactionally guarded by the attempt and operation locks, uses the unique attempt number constraint, and records `attempt_retry_scheduled`. Dispatch queue failure leaves the operation queued for the periodic dispatcher to recover; no attempt is counted until dispatch commits it.
+- If attempts are exhausted or a retry precondition fails, no new attempt is created and the operation remains in the existing `running` state for later recovery. Dead-letter transition is not included.
 - Existing pending authoritative evidence may be reprocessed as verification only; it does not create a new mutation attempt.
 - `cache_error` is deterministic evidence that cache clearing did not complete; malformed, stale, future, missing, or conflicting evidence is uncertainty, not proof of mutation failure.
+- Checkpoint 2D-2A detects expired per-attempt `timeout_at` values every minute. An unclaimed `dispatched` attempt becomes retryable `timeout` and may enter the safe retry flow above; an `accepted` or `executing` attempt becomes non-retryable `timeout` and moves the running operation to `unknown`.
+- `result_received` and terminal attempts are excluded from execution-timeout detection. Timeout audits are persisted with the transition.
 
 ### Planned later
 
-Retry only when:
-- failure is classified retryable;
-- operation is idempotent or has a safe idempotency key;
-- retry limit is not exceeded;
-- policy allows retry.
+Use exponential backoff with jitter for later retry policy expansion. Never blindly retry destructive or unknown-state operations.
 
-Use exponential backoff with jitter.
-
-Never blindly retry destructive or unknown-state operations.
-
-Timeout scheduling, automatic retry, operator retry, unknown resolution, and dead-letter transitions are not implemented by Checkpoint 2D-1.
+Operator retry, unknown resolution, total operation timeout, and dead-letter transitions are not implemented. No retry or recovery endpoint is exposed through the public API.
 
 ## 5. Incident algorithm
 

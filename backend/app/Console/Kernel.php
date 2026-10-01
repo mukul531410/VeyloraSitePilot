@@ -10,6 +10,7 @@ class Kernel extends ConsoleKernel
     protected function schedule(Schedule $schedule): void
     {
         $schedule->job(new \App\Jobs\DispatchStaleQueuedOperations())->everyMinute();
+        $schedule->job(new \App\Jobs\DetectExpiredOperationAttempts())->everyMinute();
     }
 
     protected function commands(): void

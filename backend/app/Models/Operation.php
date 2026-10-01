@@ -58,6 +58,7 @@ class Operation extends Model
         'approval_required',
         'idempotency_key',
         'max_attempts',
+        'recovery_of_operation_id',
         'requested_by',
         'started_at',
         'finished_at',
@@ -99,6 +100,16 @@ class Operation extends Model
     public function approvalRequest(): HasOne
     {
         return $this->hasOne(ApprovalRequest::class);
+    }
+
+    public function recoveryOf(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'recovery_of_operation_id');
+    }
+
+    public function recoverySuccessor(): HasOne
+    {
+        return $this->hasOne(self::class, 'recovery_of_operation_id');
     }
 
     public function isOpen(): bool

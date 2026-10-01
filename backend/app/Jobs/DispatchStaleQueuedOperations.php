@@ -14,7 +14,6 @@ class DispatchStaleQueuedOperations implements ShouldQueue
     public function handle(): void
     {
         $operations = Operation::where('status', Operation::STATUS_QUEUED)
-            ->whereNull('started_at')
             ->where('operation_type', 'action.cache_clear')
             ->get();
 

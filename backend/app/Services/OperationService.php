@@ -10,6 +10,7 @@ use App\Models\OperationResult;
 use App\Models\Site;
 use App\Models\User;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -28,76 +29,139 @@ class OperationService
         array $targetJson,
         string $idempotencyKey,
     ): Operation {
-        return DB::transaction(function () use ($user, $site, $operationType, $targetJson, $idempotencyKey) {
-            $existing = Operation::where('site_id', $site->id)
-                ->where('idempotency_key', $idempotencyKey)
-                ->first();
+        try {
+            return DB::transaction(function () use ($user, $site, $operationType, $targetJson, $idempotencyKey) {
+                $existing = Operation::where('site_id', $site->id)
+                    ->where('idempotency_key', $idempotencyKey)
+                    ->first();
 
-            if ($existing) {
-                if ($existing->target_json !== $targetJson) {
-                    throw new RuntimeException('Idempotency conflict: same key with different payload');
+                if ($existing) {
+                    return $this->returnExistingOrRejectConflict($existing, $operationType, $targetJson);
                 }
-                return $existing;
-            }
 
-            $policyEvaluation = $this->policyEngine->evaluateOperationRequest(
-                $user, $site, $operationType, $targetJson
-            );
-
-            if (! $policyEvaluation['allowed']) {
-                throw new \App\Exceptions\OperationPolicyDeniedException(
-                    'Operation denied by policy',
-                    $policyEvaluation['checks'],
-                    $policyEvaluation['policy_result']
+                $policyEvaluation = $this->policyEngine->evaluateOperationRequest(
+                    $user, $site, $operationType, $targetJson
                 );
-            }
 
-            $initialStatus = $policyEvaluation['approval_required'] ? Operation::STATUS_PENDING_APPROVAL : Operation::STATUS_QUEUED;
+                if (! $policyEvaluation['allowed']) {
+                    throw new \App\Exceptions\OperationPolicyDeniedException(
+                        'Operation denied by policy',
+                        $policyEvaluation['checks'],
+                        $policyEvaluation['policy_result']
+                    );
+                }
 
-            $operation = Operation::create([
-                'site_id' => $site->id,
-                'operation_type' => $operationType,
-                'target_json' => $targetJson,
-                'status' => $initialStatus,
-                'policy_result' => $policyEvaluation['policy_result'],
-                'approval_required' => $policyEvaluation['approval_required'],
-                'idempotency_key' => $idempotencyKey,
-                'requested_by' => $user->id,
-            ]);
+                $initialStatus = $policyEvaluation['approval_required'] ? Operation::STATUS_PENDING_APPROVAL : Operation::STATUS_QUEUED;
 
-            $this->auditLog(
-                $operation,
-                'operation_requested',
-                $user,
-                null,
-                [
+                $operation = Operation::create([
+                    'site_id' => $site->id,
                     'operation_type' => $operationType,
                     'target_json' => $targetJson,
-                    'idempotency_key' => $idempotencyKey,
+                    'status' => $initialStatus,
                     'policy_result' => $policyEvaluation['policy_result'],
                     'approval_required' => $policyEvaluation['approval_required'],
-                ],
-                $policyEvaluation['correlation_id']
+                    'idempotency_key' => $idempotencyKey,
+                    'requested_by' => $user->id,
+                ]);
+
+                $this->auditLog(
+                    $operation,
+                    'operation_requested',
+                    $user,
+                    null,
+                    [
+                        'operation_type' => $operationType,
+                        'target_json' => $targetJson,
+                        'idempotency_key' => $idempotencyKey,
+                        'policy_result' => $policyEvaluation['policy_result'],
+                        'approval_required' => $policyEvaluation['approval_required'],
+                    ],
+                    $policyEvaluation['correlation_id']
+                );
+
+                $this->auditLog(
+                    $operation,
+                    'policy_evaluated',
+                    $user,
+                    null,
+                    [
+                        'checks' => $policyEvaluation['checks'],
+                        'allowed' => $policyEvaluation['allowed'],
+                    ],
+                    $policyEvaluation['correlation_id']
+                );
+
+                if ($policyEvaluation['approval_required'] && $policyEvaluation['allowed']) {
+                    $this->createApprovalRequest($operation, $user);
+                }
+
+                return $operation->refresh();
+            });
+        } catch (QueryException $exception) {
+            return $this->resolveIdempotencyCollision(
+                $exception,
+                (string) $site->id,
+                $operationType,
+                $targetJson,
+                $idempotencyKey,
             );
+        }
+    }
 
-            $this->auditLog(
-                $operation,
-                'policy_evaluated',
-                $user,
-                null,
-                [
-                    'checks' => $policyEvaluation['checks'],
-                    'allowed' => $policyEvaluation['allowed'],
-                ],
-                $policyEvaluation['correlation_id']
-            );
+    protected function resolveIdempotencyCollision(
+        QueryException $exception,
+        string $siteId,
+        string $operationType,
+        array $targetJson,
+        string $idempotencyKey,
+    ): Operation {
+        if (! $this->isOperationIdempotencyUniqueViolation($exception)) {
+            throw $exception;
+        }
 
-            if ($policyEvaluation['approval_required'] && $policyEvaluation['allowed']) {
-                $this->createApprovalRequest($operation, $user);
-            }
+        $existing = Operation::query()
+            ->where('site_id', $siteId)
+            ->where('idempotency_key', $idempotencyKey)
+            ->first();
 
-            return $operation->refresh();
-        });
+        if ($existing === null) {
+            throw $exception;
+        }
+
+        return $this->returnExistingOrRejectConflict($existing, $operationType, $targetJson);
+    }
+
+    protected function isOperationIdempotencyUniqueViolation(QueryException $exception): bool
+    {
+        $driver = DB::connection($exception->getConnectionName())->getDriverName();
+        $errorInfo = $exception->errorInfo ?? [];
+        $sqlState = (string) ($errorInfo[0] ?? '');
+        $driverCode = (int) ($errorInfo[1] ?? 0);
+        $message = (string) ($errorInfo[2] ?? $exception->getMessage());
+        $index = 'operations_site_id_idempotency_key_unique';
+
+        return match ($driver) {
+            'sqlite' => $sqlState === '23000'
+                && $driverCode === 19
+                && str_contains($message, 'UNIQUE constraint failed: operations.site_id, operations.idempotency_key'),
+            'mysql' => $sqlState === '23000'
+                && $driverCode === 1062
+                && str_contains($message, $index),
+            'pgsql' => $sqlState === '23505'
+                && str_contains($message, $index),
+            'sqlsrv' => in_array($driverCode, [2601, 2627], true)
+                && str_contains($message, $index),
+            default => false,
+        };
+    }
+
+    private function returnExistingOrRejectConflict(Operation $existing, string $operationType, array $targetJson): Operation
+    {
+        if ($existing->operation_type !== $operationType || $existing->target_json !== $targetJson) {
+            throw new RuntimeException('Idempotency conflict: same key with different request');
+        }
+
+        return $existing;
     }
 
     private function createApprovalRequest(Operation $operation, User $user): void

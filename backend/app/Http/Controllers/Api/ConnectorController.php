@@ -299,10 +299,11 @@ class ConnectorController extends BaseController
         }
 
         $result = DB::transaction(function () use ($attempt, $connection, $validated, $jobId) {
-            $attempt->refresh();
+            $lockedAttempt = OperationAttempt::whereKey($attempt->id)->lockForUpdate()->firstOrFail();
+            $operation = Operation::whereKey($lockedAttempt->operation_id)->lockForUpdate()->firstOrFail();
 
-            if ($attempt->status === OperationAttempt::STATUS_RESULT_RECEIVED) {
-                $existingResult = $attempt->result()->first();
+            if ($lockedAttempt->status === OperationAttempt::STATUS_RESULT_RECEIVED) {
+                $existingResult = $lockedAttempt->result()->first();
                 if ($existingResult && $this->resultMatchesPayload($existingResult, $validated)) {
                     return $existingResult;
                 }
@@ -312,21 +313,34 @@ class ConnectorController extends BaseController
                 ]);
             }
 
-            if (in_array($attempt->status, OperationAttempt::TERMINAL_STATUSES, true)) {
+            if (in_array($lockedAttempt->status, OperationAttempt::TERMINAL_STATUSES, true)) {
                 throw ValidationException::withMessages([
                     'status' => ['Job already terminal'],
                 ]);
             }
 
-            if ($attempt->connector_job_id !== $jobId) {
+            if ($lockedAttempt->status !== OperationAttempt::STATUS_ACCEPTED
+                && $lockedAttempt->status !== OperationAttempt::STATUS_EXECUTING) {
+                throw ValidationException::withMessages([
+                    'status' => ['Job is not in a result-submittable state'],
+                ]);
+            }
+
+            if ($operation->status !== Operation::STATUS_RUNNING) {
+                throw ValidationException::withMessages([
+                    'status' => ['Operation is no longer running'],
+                ]);
+            }
+
+            if ($lockedAttempt->connector_job_id !== $jobId) {
                 throw ValidationException::withMessages([
                     'job_id' => ['Connector job ID mismatch'],
                 ]);
             }
 
             $result = OperationResult::create([
-                'operation_id' => $attempt->operation_id,
-                'operation_attempt_id' => $attempt->id,
+                'operation_id' => $lockedAttempt->operation_id,
+                'operation_attempt_id' => $lockedAttempt->id,
                 'connector_job_id' => $jobId,
                 'verification_status' => OperationResult::VERIFICATION_PENDING,
                 'result_status' => $validated['status'] === 'success' ? 'success' : 'failed',
@@ -338,12 +352,12 @@ class ConnectorController extends BaseController
                 'result_summary' => $validated['status'] === 'success' ? 'Cleared' : 'Failed',
             ]);
 
-            $attempt->update([
+            $lockedAttempt->update([
                 'status' => OperationAttempt::STATUS_RESULT_RECEIVED,
                 'finished_at' => now(),
             ]);
 
-            $attempt->operation->update([
+            $operation->update([
                 'status' => Operation::STATUS_VERIFICATION_PENDING,
                 'finished_at' => null,
             ]);
@@ -354,13 +368,13 @@ class ConnectorController extends BaseController
                 'site_id' => $connection->site_id,
                 'action' => 'result_received',
                 'target_type' => 'operation',
-                'target_id' => $attempt->operation_id,
-                'correlation_id' => $attempt->operation_id,
-                'policy_result' => $attempt->operation->policy_result,
+                'target_id' => $lockedAttempt->operation_id,
+                'correlation_id' => $lockedAttempt->operation_id,
+                'policy_result' => $operation->policy_result,
                 'metadata_json' => [
                     'operation_type' => 'action.cache_clear',
-                    'attempt_id' => $attempt->id,
-                    'attempt_number' => $attempt->attempt_number,
+                    'attempt_id' => $lockedAttempt->id,
+                    'attempt_number' => $lockedAttempt->attempt_number,
                     'connector_job_id' => $jobId,
                     'result_status' => $validated['status'],
                     'error_code' => $validated['error_code'] ?? null,

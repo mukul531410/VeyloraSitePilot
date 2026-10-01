@@ -28,12 +28,16 @@ class OperationRetryClassifier
     /** Call only after timeout/failure is detected, while the attempt state is locked. */
     public function classifyAttemptFailure(OperationAttempt $attempt): string
     {
+        if ($attempt->status === OperationAttempt::STATUS_TIMEOUT) {
+            return $attempt->retryable === true ? self::SAFE_AUTOMATIC_RETRY : self::UNKNOWN;
+        }
+
         if ($attempt->status === OperationAttempt::STATUS_DISPATCHED) {
             // The connector protocol requires a successful claim before execution.
             return self::SAFE_AUTOMATIC_RETRY;
         }
 
-        if (in_array($attempt->status, [OperationAttempt::STATUS_FAILED, OperationAttempt::STATUS_TIMEOUT], true)
+        if ($attempt->status === OperationAttempt::STATUS_FAILED
             && $attempt->retryable === true) {
             return self::SAFE_AUTOMATIC_RETRY;
         }

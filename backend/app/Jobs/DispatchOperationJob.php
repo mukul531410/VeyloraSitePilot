@@ -8,16 +8,18 @@ use App\Models\Site;
 use App\Models\SiteConnection;
 use App\Models\ConnectorCapability;
 use App\Services\MaintenanceLock;
+use App\Services\OperationRetryClassifier;
+use App\Services\OperationRetryPreconditions;
 use App\Services\PolicyEngine;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
+use Illuminate\Contracts\Queue\ShouldBeUniqueUntilProcessing;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
 
-class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
+class DispatchOperationJob implements ShouldQueue, ShouldBeUniqueUntilProcessing
 {
     use Dispatchable, Queueable;
 
@@ -36,11 +38,12 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
     public function handle(
         MaintenanceLock $maintenanceLock,
         PolicyEngine $policyEngine,
+        ?OperationRetryPreconditions $retryPreconditions = null,
     ): void {
         $lock = null;
 
         try {
-            DB::transaction(function () use ($maintenanceLock, $policyEngine, &$lock) {
+            DB::transaction(function () use ($maintenanceLock, $policyEngine, $retryPreconditions, &$lock) {
                 $operation = Operation::whereKey($this->operationId)
                     ->lockForUpdate()
                     ->firstOrFail();
@@ -56,7 +59,24 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
                 }
 
                 $attemptCount = $operation->attempts()->count();
-                if ($attemptCount >= (int) $operation->max_attempts) {
+                $previousAttempt = $operation->attempts()->orderByDesc('attempt_number')->first();
+                $isSafeTimeoutRetry = $previousAttempt
+                    && $previousAttempt->status === OperationAttempt::STATUS_TIMEOUT
+                    && $previousAttempt->retryable === true;
+
+                if ($isSafeTimeoutRetry && $attemptCount >= (int) $operation->max_attempts) {
+                    $this->blockRetry($operation, $previousAttempt, 'max_attempts_exhausted', OperationRetryClassifier::NON_RETRYABLE);
+                    return;
+                }
+
+                if ($isSafeTimeoutRetry) {
+                    $retryPreconditions ??= app(OperationRetryPreconditions::class);
+                    $preconditionFailure = $retryPreconditions->failureReason($operation, $policyEngine);
+                    if ($preconditionFailure !== null) {
+                        $this->blockRetry($operation, $previousAttempt, $preconditionFailure, OperationRetryClassifier::NON_RETRYABLE);
+                        return;
+                    }
+                } elseif ($attemptCount >= (int) $operation->max_attempts) {
                     throw new RuntimeException('Maximum attempts reached for operation ' . $operation->id);
                 }
 
@@ -143,6 +163,30 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUnique
             'correlation_id' => $operation->id,
             'policy_result' => $operation->policy_result,
             'metadata_json' => array_merge(['operation_type' => $operation->operation_type], $metadata),
+        ]);
+    }
+
+    private function blockRetry(
+        Operation $operation,
+        OperationAttempt $previousAttempt,
+        string $reason,
+        string $classification,
+    ): void {
+        $operation->update([
+            'status' => Operation::STATUS_RUNNING,
+            'finished_at' => null,
+        ]);
+
+        $this->auditLog($operation, 'attempt_retry_blocked', [
+            'operation_id' => $operation->id,
+            'previous_attempt_id' => $previousAttempt->id,
+            'previous_attempt_number' => $previousAttempt->attempt_number,
+            'previous_connector_job_id' => $previousAttempt->connector_job_id,
+            'retry_classification' => $classification,
+            'retry_reason' => $reason === 'max_attempts_exhausted' ? $reason : 'precondition_failed',
+            'precondition_failure' => $reason === 'max_attempts_exhausted' ? null : $reason,
+            'max_attempts' => (int) $operation->max_attempts,
+            'blocked_at' => now('UTC')->toIso8601String(),
         ]);
     }
 }

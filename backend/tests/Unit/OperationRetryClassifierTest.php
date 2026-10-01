@@ -62,7 +62,7 @@ class OperationRetryClassifierTest extends TestCase
         $classifier = app(OperationRetryClassifier::class);
 
         $this->assertSame('safe_automatic_retry', $classifier->classifyAttemptFailure(new OperationAttempt(['status' => 'timeout', 'retryable' => true])));
-        $this->assertSame('non_retryable', $classifier->classifyAttemptFailure(new OperationAttempt(['status' => 'timeout', 'retryable' => false])));
+        $this->assertSame('unknown', $classifier->classifyAttemptFailure(new OperationAttempt(['status' => 'timeout', 'retryable' => false])));
     }
 
     public function test_pending_existing_evidence_allows_only_verification_retry(): void

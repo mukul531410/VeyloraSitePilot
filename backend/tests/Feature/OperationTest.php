@@ -13,7 +13,10 @@ use App\Models\Site;
 use App\Models\SiteConnection;
 use App\Models\User;
 use App\Services\MaintenanceLock;
+use App\Services\OperationService;
+use App\Services\PolicyEngine;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Queue;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -318,6 +321,110 @@ class OperationTest extends TestCase
         $this->assertDatabaseCount('operations', 1);
     }
 
+    public function test_same_key_and_target_with_different_operation_type_conflicts_at_service_boundary(): void
+    {
+        [$user, , $site] = $this->createUserWithSite();
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+        $target = ['cache_type' => 'wordpress'];
+
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'idem-type-conflict',
+            'target_json' => $target,
+        ]);
+        $response->assertCreated();
+
+        try {
+            app(OperationService::class)->createOperation($user, $site, 'action.other', $target, 'idem-type-conflict');
+            $this->fail('An idempotency key cannot identify different operation types.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Idempotency conflict', $exception->getMessage());
+        }
+
+        try {
+            app(OperationService::class)->createOperation(
+                $user,
+                $site,
+                'action.cache_clear',
+                ['cache_type' => 'wordpress', 'scope' => 'other'],
+                'idem-type-conflict',
+            );
+            $this->fail('An idempotency key cannot identify different targets.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Idempotency conflict', $exception->getMessage());
+        }
+
+        $this->assertDatabaseCount('operations', 1);
+    }
+
+    public function test_expected_unique_key_collision_rereads_existing_request_and_replays_or_conflicts(): void
+    {
+        [$user, , $site] = $this->createUserWithSite();
+        Sanctum::actingAs($user);
+        $this->createActiveConnectionWithCapability($site);
+        $target = ['cache_type' => 'wordpress'];
+        $response = $this->postJson('/api/v1/sites/' . $site->id . '/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'idem-collision',
+            'target_json' => $target,
+        ]);
+        $response->assertCreated();
+        $existing = Operation::findOrFail($response->json('data.id'));
+
+        $service = new class(app(PolicyEngine::class), app(MaintenanceLock::class)) extends OperationService {
+            public function resolveCollision(QueryException $exception, string $siteId, string $type, array $target, string $key): Operation
+            {
+                return $this->resolveIdempotencyCollision($exception, $siteId, $type, $target, $key);
+            }
+        };
+
+        $message = 'UNIQUE constraint failed: operations.site_id, operations.idempotency_key';
+        $previous = new \PDOException('SQLSTATE[23000]: Integrity constraint violation: 19 ' . $message, 23000);
+        $previous->errorInfo = ['23000', 19, $message];
+        $collision = new QueryException('sqlite', 'insert into operations (...) values (...)', [], $previous);
+
+        $replayed = $service->resolveCollision($collision, $site->id, 'action.cache_clear', $target, 'idem-collision');
+        $this->assertSame($existing->id, $replayed->id);
+
+        foreach ([
+            ['action.cache_clear', ['cache_type' => 'wordpress', 'scope' => 'other']],
+            ['action.other', $target],
+        ] as [$type, $differentTarget]) {
+            try {
+                $service->resolveCollision($collision, $site->id, $type, $differentTarget, 'idem-collision');
+                $this->fail('A unique-key collision for a different logical request must conflict.');
+            } catch (\RuntimeException $exception) {
+                $this->assertStringContainsString('Idempotency conflict', $exception->getMessage());
+            }
+        }
+
+        $this->assertDatabaseCount('operations', 1);
+    }
+
+    public function test_unrelated_unique_constraint_exception_is_not_swallowed(): void
+    {
+        [$user, , $site] = $this->createUserWithSite();
+        $service = new class(app(PolicyEngine::class), app(MaintenanceLock::class)) extends OperationService {
+            public function resolveCollision(QueryException $exception, string $siteId): Operation
+            {
+                return $this->resolveIdempotencyCollision($exception, $siteId, 'action.cache_clear', [], 'unrelated');
+            }
+        };
+
+        $message = 'UNIQUE constraint failed: users.email';
+        $previous = new \PDOException('SQLSTATE[23000]: Integrity constraint violation: 19 ' . $message, 23000);
+        $previous->errorInfo = ['23000', 19, $message];
+        $unrelated = new QueryException('sqlite', 'insert into users (...) values (...)', [], $previous);
+
+        try {
+            $service->resolveCollision($unrelated, $site->id);
+            $this->fail('Unrelated database exceptions must be rethrown.');
+        } catch (QueryException $exception) {
+            $this->assertSame($unrelated, $exception);
+        }
+    }
+
     public function test_same_idempotency_key_different_sites_no_collision(): void
     {
         [$user, $organization, $site1] = $this->createUserWithSite();
@@ -578,7 +685,7 @@ class OperationTest extends TestCase
         );
 
         $this->assertDatabaseCount('operation_attempts', 1);
-        $attempt = OperationAttempt::firstOrFail();
+        $attempt = OperationAttempt::where('operation_id', $operation->id)->firstOrFail();
         $this->assertSame(1, $attempt->attempt_number);
         $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->status);
         $this->assertNotNull($attempt->connector_job_id);
@@ -666,6 +773,18 @@ class OperationTest extends TestCase
         $job->handle($maintenanceLock, $policyEngine);
 
         $this->assertDatabaseCount('operation_attempts', 1);
+    }
+
+    public function test_queued_dispatch_jobs_remain_unique_per_operation(): void
+    {
+        $operation = $this->createQueuedOperation();
+        Queue::fake();
+
+        \App\Jobs\DispatchOperationJob::dispatch($operation->id);
+        \App\Jobs\DispatchOperationJob::dispatch($operation->id);
+
+        Queue::assertPushed(\App\Jobs\DispatchOperationJob::class, 1);
+        $this->assertSame(0, OperationAttempt::where('operation_id', $operation->id)->count());
     }
 
     public function test_dispatching_after_attempt_one_allocates_attempt_two_with_a_new_connector_job_id(): void
@@ -809,6 +928,515 @@ class OperationTest extends TestCase
         $this->assertSame(Operation::STATUS_RUNNING, $second->fresh()->status);
     }
 
+    public function test_expired_dispatched_attempt_times_out_and_automatically_retries_same_operation(): void
+    {
+        [, $attempt, $jobId] = $this->createDispatchedJob('timeout-dispatched-token');
+        $operation = Operation::findOrFail($attempt->operation_id);
+        $originalIdempotencyKey = $operation->idempotency_key;
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $attempt->refresh();
+        $this->assertSame('timeout', $attempt->status);
+        $this->assertTrue($attempt->retryable);
+        $this->assertSame('attempt_timeout', $attempt->error_code);
+        $this->assertNotNull($attempt->finished_at);
+        $this->assertSame($jobId, $attempt->connector_job_id);
+        $this->assertNotNull($attempt->timeout_at);
+        $this->assertSame('safe_automatic_retry', app(\App\Services\OperationRetryClassifier::class)->classifyAttemptFailure($attempt));
+        $this->assertSame('running', $operation->fresh()->status);
+        $this->assertSame($originalIdempotencyKey, $operation->fresh()->idempotency_key);
+        $this->assertSame(2, OperationAttempt::where('operation_id', $attempt->operation_id)->count());
+        $this->assertSame(1, Operation::where('site_id', $operation->site_id)->where('idempotency_key', $originalIdempotencyKey)->count());
+        $secondAttempt = OperationAttempt::where('operation_id', $attempt->operation_id)->where('attempt_number', 2)->firstOrFail();
+        $this->assertSame('dispatched', $secondAttempt->status);
+        $this->assertNotSame($jobId, $secondAttempt->connector_job_id);
+
+        $event = \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_timeout')->firstOrFail();
+        $this->assertSame([
+            'operation_id' => $attempt->operation_id,
+            'attempt_id' => $attempt->id,
+            'attempt_number' => 1,
+            'connector_job_id' => $jobId,
+            'previous_attempt_status' => 'dispatched',
+            'new_attempt_status' => 'timeout',
+            'previous_operation_status' => 'running',
+            'new_operation_status' => 'running',
+            'timeout_at' => $attempt->timeout_at->toIso8601String(),
+            'detected_at' => $event->metadata_json['detected_at'],
+            'retry_classification' => 'safe_automatic_retry',
+        ], $event->metadata_json);
+
+        $retryEvent = \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_retry_scheduled')->firstOrFail();
+        $this->assertSame([
+            'operation_id' => $operation->id,
+            'previous_attempt_id' => $attempt->id,
+            'previous_attempt_number' => 1,
+            'new_attempt_number' => 2,
+            'previous_connector_job_id' => $jobId,
+            'retry_classification' => 'safe_automatic_retry',
+            'retry_reason' => 'expired_dispatched_attempt',
+            'scheduled_at' => $retryEvent->metadata_json['scheduled_at'],
+            'max_attempts' => 3,
+        ], $retryEvent->metadata_json);
+
+        $this->runExpiredAttemptDetector();
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_timeout')->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_retry_scheduled')->count());
+        $this->assertSame(2, OperationAttempt::where('operation_id', $attempt->operation_id)->count());
+    }
+
+    public function test_expired_accepted_attempt_times_out_as_unknown_and_marks_operation_unknown(): void
+    {
+        [, $attempt, $jobId] = $this->createClaimedJob('timeout-accepted-token');
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $attempt->refresh();
+        $operation = Operation::findOrFail($attempt->operation_id);
+        $this->assertSame('timeout', $attempt->status);
+        $this->assertFalse($attempt->retryable);
+        $this->assertSame('attempt_timeout', $attempt->error_code);
+        $this->assertSame($jobId, $attempt->connector_job_id);
+        $this->assertSame('unknown', app(\App\Services\OperationRetryClassifier::class)->classifyAttemptFailure($attempt));
+        $this->assertSame('unknown', $operation->status);
+        $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+
+        $timeoutEvent = \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_timeout')->firstOrFail();
+        $unknownEvent = \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_unknown')->firstOrFail();
+        $this->assertSame('accepted', $timeoutEvent->metadata_json['previous_attempt_status']);
+        $this->assertSame('running', $timeoutEvent->metadata_json['previous_operation_status']);
+        $this->assertSame('unknown', $timeoutEvent->metadata_json['new_operation_status']);
+        $this->assertSame('unknown', $timeoutEvent->metadata_json['retry_classification']);
+        $this->assertSame($timeoutEvent->metadata_json, $unknownEvent->metadata_json);
+        $this->assertNotNull($operation->finished_at);
+
+        $this->runExpiredAttemptDetector();
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_timeout')->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_unknown')->count());
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_max_attempts_three_retries_twice_then_dead_letters_without_a_fourth_attempt(): void
+    {
+        [, $firstAttempt] = $this->createDispatchedJob('timeout-max-three-token');
+        $operation = Operation::findOrFail($firstAttempt->operation_id);
+        $operation->update(['max_attempts' => 3]);
+        $firstAttempt->update(['timeout_at' => now()->subSecond()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame([1, 2], OperationAttempt::where('operation_id', $operation->id)->orderBy('attempt_number')->pluck('attempt_number')->all());
+        $secondAttempt = OperationAttempt::where('operation_id', $operation->id)->where('attempt_number', 2)->firstOrFail();
+        $this->assertSame('dispatched', $secondAttempt->status);
+
+        $secondAttempt->update(['timeout_at' => now()->subSecond()]);
+        $this->runExpiredAttemptDetector();
+
+        $thirdAttempt = OperationAttempt::where('operation_id', $operation->id)->where('attempt_number', 3)->firstOrFail();
+        $this->assertSame('dispatched', $thirdAttempt->status);
+        $this->assertSame('running', $operation->fresh()->status);
+
+        $thirdAttempt->update(['timeout_at' => now()->subSecond()]);
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame(3, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(3, $operation->fresh()->max_attempts);
+        $this->assertSame('dead_letter', $operation->fresh()->status);
+        $this->assertSame(2, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+        $this->assertSame(3, $thirdAttempt->fresh()->attempt_number);
+        $this->assertSame(3, OperationAttempt::where('operation_id', $operation->id)->distinct('connector_job_id')->count('connector_job_id'));
+
+        $this->runExpiredAttemptDetector();
+        $this->assertSame(3, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_max_attempts_one_dead_letters_and_preserves_operation_and_approval_fields(): void
+    {
+        [$site, $operation, $attempt] = $this->createApprovedDispatchedOperation('timeout-max-one-token');
+        $operation->update(['max_attempts' => 1]);
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+        $approval = $operation->approvalRequest()->firstOrFail();
+        $before = [
+            'id' => $operation->id,
+            'site_id' => $operation->site_id,
+            'organization_id' => $site->organization_id,
+            'operation_type' => $operation->operation_type,
+            'target_json' => $operation->target_json,
+            'idempotency_key' => $operation->idempotency_key,
+            'approval_required' => $operation->approval_required,
+            'max_attempts' => $operation->max_attempts,
+            'approval_id' => $approval->id,
+            'approval_status' => $approval->status,
+            'connector_job_id' => $attempt->connector_job_id,
+        ];
+
+        $this->runExpiredAttemptDetector();
+
+        $operation = $operation->fresh();
+        $attempt = $attempt->fresh();
+        $this->assertSame('dead_letter', $operation->status);
+        $this->assertSame(1, $operation->max_attempts);
+        $this->assertSame('timeout', $attempt->status);
+        $this->assertTrue($attempt->retryable);
+        $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame($before['connector_job_id'], $attempt->connector_job_id);
+        $this->assertSame($before['id'], $operation->id);
+        $this->assertSame($before['site_id'], $operation->site_id);
+        $this->assertSame($before['organization_id'], $operation->site->organization_id);
+        $this->assertSame($before['operation_type'], $operation->operation_type);
+        $this->assertSame($before['target_json'], $operation->target_json);
+        $this->assertSame($before['idempotency_key'], $operation->idempotency_key);
+        $this->assertSame($before['approval_required'], $operation->approval_required);
+        $this->assertSame($before['max_attempts'], $operation->max_attempts);
+        $this->assertSame($before['approval_id'], $operation->approvalRequest->id);
+        $this->assertSame($before['approval_status'], $operation->approvalRequest->status);
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count());
+
+        $event = \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->firstOrFail();
+        $this->assertSame('operation', $event->target_type);
+        $this->assertSame($operation->id, $event->correlation_id);
+        $this->assertSame($attempt->id, $event->metadata_json['attempt_id']);
+        $this->assertSame(1, $event->metadata_json['attempt_number']);
+        $this->assertSame(1, $event->metadata_json['max_attempts']);
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+
+        $this->runExpiredAttemptDetector();
+        $this->assertSame('dead_letter', $operation->fresh()->status);
+        $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_expired_dispatched_attempt_is_ignored_if_operation_is_no_longer_running(): void
+    {
+        [, $attempt] = $this->createDispatchedJob('timeout-operation-state-changed');
+        $operation = Operation::findOrFail($attempt->operation_id);
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+        $operation->update(['status' => Operation::STATUS_CANCELLED]);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame(Operation::STATUS_CANCELLED, $operation->fresh()->status);
+        $this->assertSame('dispatched', $attempt->fresh()->status);
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_inactive_revoked_or_capability_missing_connector_blocks_automatic_retry(): void
+    {
+        foreach ([
+            'inactive',
+            'revoked',
+            'capability_missing',
+            'policy_changed',
+            'requesting_user_inactive',
+            'membership_inactive',
+            'organization_suspended',
+            'site_inactive',
+        ] as $condition) {
+            [$site, $attempt] = $this->createDispatchedJob('timeout-precondition-'.$condition);
+            $operation = Operation::findOrFail($attempt->operation_id);
+            $connection = $site->connections()->where('status', 'active')->firstOrFail();
+
+            if ($condition === 'inactive') {
+                $connection->update(['status' => 'inactive']);
+            } elseif ($condition === 'revoked') {
+                $connection->update(['revoked_at' => now()]);
+            } elseif ($condition === 'capability_missing') {
+                $connection->capabilities()->where('capability_key', 'action.cache_clear')->delete();
+            } elseif ($condition === 'policy_changed') {
+                $site->organization->update(['approval_policy' => ['require_approval' => false]]);
+            } elseif ($condition === 'requesting_user_inactive') {
+                $operation->requestedBy->update(['status' => 'inactive']);
+            } elseif ($condition === 'membership_inactive') {
+                OrganizationMember::where('organization_id', $site->organization_id)
+                    ->where('user_id', $operation->requested_by)
+                    ->update(['status' => 'inactive']);
+            } elseif ($condition === 'organization_suspended') {
+                $site->organization->update(['status' => 'suspended']);
+            } else {
+                $site->update(['status' => 'inactive']);
+            }
+
+            $attempt->update(['timeout_at' => now()->subSecond()]);
+            $this->runExpiredAttemptDetector();
+
+            $this->assertSame('running', $operation->fresh()->status, $condition);
+            $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count(), $condition);
+            $this->assertSame(0, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count(), $condition);
+            $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_blocked')->count(), $condition);
+            $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->distinct('connector_job_id')->count('connector_job_id'), $condition);
+            $this->assertSame(0, \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count(), $condition);
+        }
+    }
+
+    public function test_retry_dispatch_releases_maintenance_lock_and_does_not_create_a_second_approval(): void
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => true,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $connection = $this->createConnectorWithToken($site, 'timeout-approved-retry-token');
+        ConnectorCapability::create([
+            'site_connection_id' => $connection->id,
+            'capability_key' => 'action.cache_clear',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+        $response = $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => 'approved-timeout-retry',
+        ]);
+        $response->assertCreated()->assertJsonPath('data.status', 'pending_approval');
+        $operation = Operation::findOrFail($response->json('data.id'));
+        $approval = \App\Models\ApprovalRequest::where('operation_id', $operation->id)->firstOrFail();
+        $approval->update(['status' => 'approved', 'reviewed_by' => User::factory()->create()->id, 'reviewed_at' => now()]);
+        \Illuminate\Support\Facades\DB::table('operations')->where('id', $operation->id)->update([
+            'status' => Operation::STATUS_QUEUED,
+            'policy_result' => 'approved',
+        ]);
+
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+        (new \App\Jobs\DispatchOperationJob($operation->id))->handle(
+            $this->app->make(MaintenanceLock::class),
+            $this->app->make(\App\Services\PolicyEngine::class),
+        );
+        $attempt = OperationAttempt::where('operation_id', $operation->id)->firstOrFail();
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+        $approvalCount = \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count();
+
+        $lock = \Mockery::mock(MaintenanceLock::class);
+        $lock->shouldReceive('acquire')->once()->with($site->id, $operation->id, 2)->andReturn(true);
+        $lock->shouldReceive('release')->once()->with($site->id, $operation->id, 2)->andReturn(true);
+        $this->app->instance(MaintenanceLock::class, $lock);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame(2, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame($approvalCount, \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count());
+    }
+
+    public function test_retry_preserves_original_approval_when_current_policy_no_longer_requires_approval(): void
+    {
+        [$site, $operation, $attempt] = $this->createApprovedDispatchedOperation('approval-policy-relaxed');
+        $site->organization->update(['approval_policy' => [
+            'require_approval' => false,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertTrue($operation->fresh()->approval_required);
+        $this->assertSame(2, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame(1, \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count());
+    }
+
+    public function test_retry_requires_original_approval_to_remain_approved(): void
+    {
+        foreach ([
+            'pending' => 'pending',
+            'rejected' => 'rejected',
+            'expired' => 'expired',
+            'missing' => null,
+        ] as $case => $approvalStatus) {
+            [, $operation, $attempt] = $this->createApprovedDispatchedOperation('approval-state-'.$case);
+            $approval = $operation->approvalRequest;
+            if ($approvalStatus === null) {
+                $approval->delete();
+            } else {
+                $approval->update(['status' => $approvalStatus]);
+            }
+            $existingApprovalCount = \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count();
+            $originalConnectorJobId = $attempt->connector_job_id;
+            $attempt->update(['timeout_at' => now()->subSecond()]);
+
+            $this->runExpiredAttemptDetector();
+
+            $attempts = OperationAttempt::where('operation_id', $operation->id)->get();
+            $this->assertSame(1, $attempts->count(), $case);
+            $this->assertSame([$originalConnectorJobId], $attempts->pluck('connector_job_id')->all(), $case);
+            $this->assertSame($existingApprovalCount, \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count(), $case);
+            $this->assertSame(0, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count(), $case);
+            $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_blocked')->count(), $case);
+            $this->assertSame(Operation::STATUS_RUNNING, $operation->fresh()->status, $case);
+        }
+    }
+
+    public function test_failed_retry_dispatch_can_be_recovered_by_stale_dispatcher_without_duplicate_attempt(): void
+    {
+        [, $attempt] = $this->createDispatchedJob('timeout-lock-failure-token');
+        $operation = Operation::findOrFail($attempt->operation_id);
+        $firstConnectorJobId = $attempt->connector_job_id;
+        $attempt->update(['timeout_at' => now()->subSecond()]);
+
+        $lock = \Mockery::mock(MaintenanceLock::class);
+        $lock->shouldReceive('acquire')->once()->with($operation->site_id, $operation->id, 2)->andThrow(new \RuntimeException('Redis unavailable'));
+        $lock->shouldNotReceive('release');
+        $this->app->instance(MaintenanceLock::class, $lock);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame(1, OperationAttempt::where('operation_id', $operation->id)->count());
+        $this->assertSame('queued', $operation->fresh()->status);
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_scheduled')->count());
+        $this->assertSame(1, \App\Models\AuditLog::where('target_id', $operation->id)->where('action', 'attempt_retry_dispatch_failed')->count());
+
+        // The sync queue runs Laravel's real unique-until-processing handler path;
+        // it releases the queued uniqueness lock before the simulated handler failure.
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+        (new \App\Jobs\DispatchStaleQueuedOperations())->handle();
+        (new \App\Jobs\DispatchStaleQueuedOperations())->handle();
+
+        $attempts = OperationAttempt::where('operation_id', $operation->id)->orderBy('attempt_number')->get();
+        $this->assertSame([1, 2], $attempts->pluck('attempt_number')->all());
+        $this->assertSame(2, $attempts->pluck('connector_job_id')->unique()->count());
+        $this->assertNotSame($firstConnectorJobId, $attempts[1]->connector_job_id);
+        $this->assertSame(Operation::STATUS_RUNNING, $operation->fresh()->status);
+        $this->assertSame(0, \App\Models\ApprovalRequest::where('operation_id', $operation->id)->count());
+    }
+
+    public function test_expired_executing_attempt_times_out_as_unknown(): void
+    {
+        [, $attempt] = $this->createClaimedJob('timeout-executing-token');
+        $attempt->update(['status' => 'executing', 'timeout_at' => now()->subSecond()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $attempt->refresh();
+        $this->assertSame('timeout', $attempt->status);
+        $this->assertFalse($attempt->retryable);
+        $this->assertSame('unknown', app(\App\Services\OperationRetryClassifier::class)->classifyAttemptFailure($attempt));
+        $this->assertSame('unknown', Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertSame('executing', \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_timeout')->firstOrFail()->metadata_json['previous_attempt_status']);
+        $this->assertSame(1, OperationAttempt::where('operation_id', $attempt->operation_id)->count());
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_retry_scheduled')->count());
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_expired_result_received_attempt_is_ignored_for_verification_lifecycle(): void
+    {
+        [, $attempt, $jobId] = $this->createClaimedJob('timeout-result-received-token');
+        OperationResult::create([
+            'operation_id' => $attempt->operation_id,
+            'operation_attempt_id' => $attempt->id,
+            'connector_job_id' => $jobId,
+            'result_status' => 'success',
+            'verification_status' => 'pending',
+        ]);
+        $attempt->update(['status' => 'result_received', 'timeout_at' => now()->subSecond()]);
+        Operation::findOrFail($attempt->operation_id)->update(['status' => 'verification_pending']);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame('result_received', $attempt->fresh()->status);
+        $this->assertSame('verification_pending', Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->whereIn('action', ['attempt_timeout', 'operation_unknown'])->count());
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'operation_dead_lettered')->count());
+    }
+
+    public function test_terminal_attempts_are_ignored_by_timeout_detector(): void
+    {
+        foreach (['succeeded', 'failed', 'timeout', 'rejected'] as $status) {
+            [, $attempt] = $this->createDispatchedJob('timeout-terminal-'.$status);
+            $attempt->update([
+                'status' => $status,
+                'timeout_at' => now()->subSecond(),
+                'error_code' => 'preserve-me',
+                'finished_at' => now()->subMinute(),
+            ]);
+
+            $this->runExpiredAttemptDetector();
+
+            $attempt->refresh();
+            $this->assertSame($status, $attempt->status);
+            $this->assertSame('preserve-me', $attempt->error_code);
+            $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_timeout')->count());
+        }
+    }
+
+    public function test_terminal_operations_are_not_overwritten_by_expired_accepted_attempts(): void
+    {
+        foreach (['cancelled', 'unknown', 'succeeded', 'failed', 'dead_letter'] as $status) {
+            [, $attempt] = $this->createClaimedJob('timeout-terminal-operation-'.$status);
+            $attempt->update(['timeout_at' => now()->subSecond()]);
+            Operation::findOrFail($attempt->operation_id)->update(['status' => $status]);
+
+            $this->runExpiredAttemptDetector();
+
+            $this->assertSame('accepted', $attempt->fresh()->status);
+            $this->assertSame($status, Operation::findOrFail($attempt->operation_id)->status);
+            $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->whereIn('action', ['attempt_timeout', 'operation_unknown'])->count());
+        }
+    }
+
+    public function test_attempt_before_timeout_at_is_not_processed(): void
+    {
+        [, $attempt] = $this->createDispatchedJob('timeout-not-yet-expired-token');
+        $attempt->update(['timeout_at' => now()->addMinute()]);
+
+        $this->runExpiredAttemptDetector();
+
+        $this->assertSame('dispatched', $attempt->fresh()->status);
+        $this->assertTrue($attempt->fresh()->retryable === false);
+        $this->assertSame('running', Operation::findOrFail($attempt->operation_id)->status);
+        $this->assertSame(0, \App\Models\AuditLog::where('target_id', $attempt->operation_id)->where('action', 'attempt_timeout')->count());
+    }
+
+    private function runExpiredAttemptDetector(): void
+    {
+        (new \App\Jobs\DetectExpiredOperationAttempts())->handle(
+            app(\App\Services\OperationRetryClassifier::class),
+            app(\App\Services\OperationRetryPreconditions::class),
+            app(\App\Services\PolicyEngine::class),
+        );
+    }
+
+    private function createApprovedDispatchedOperation(string $key): array
+    {
+        [$user, $organization, $site] = $this->createUserWithSite();
+        $organization->update(['approval_policy' => [
+            'require_approval' => true,
+            'high_criticality_requires_approval' => false,
+        ]]);
+        Sanctum::actingAs($user);
+        $connection = $this->createConnectorWithToken($site, $key.'-token');
+        ConnectorCapability::create([
+            'site_connection_id' => $connection->id,
+            'capability_key' => 'action.cache_clear',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+
+        $response = $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
+            'operation_type' => 'action.cache_clear',
+            'idempotency_key' => $key,
+        ]);
+        $response->assertCreated()->assertJsonPath('data.status', Operation::STATUS_PENDING_APPROVAL);
+        $operation = Operation::findOrFail($response->json('data.id'));
+        $operation->approvalRequest->update([
+            'status' => \App\Models\ApprovalRequest::STATUS_APPROVED,
+            'reviewed_by' => User::factory()->create()->id,
+            'reviewed_at' => now(),
+        ]);
+        \Illuminate\Support\Facades\DB::table('operations')->where('id', $operation->id)->update([
+            'status' => Operation::STATUS_QUEUED,
+            'policy_result' => 'approved',
+        ]);
+
+        $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
+        \App\Jobs\DispatchOperationJob::dispatch($operation->id);
+        $attempt = OperationAttempt::where('operation_id', $operation->id)->firstOrFail();
+
+        return [$site, $operation->fresh(), $attempt->fresh()];
+    }
+
     public function test_dispatching_pending_approval_operation_does_not_create_attempt(): void
     {
         [$user, $organization, $site] = $this->createUserWithSite();
@@ -862,7 +1490,7 @@ class OperationTest extends TestCase
 
         $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
         \App\Jobs\DispatchOperationJob::dispatch($response->json('data.id'));
-        $attempt = OperationAttempt::firstOrFail();
+        $attempt = OperationAttempt::where('operation_id', $response->json('data.id'))->firstOrFail();
 
         return [$site, $attempt->fresh(), $attempt->connector_job_id, $token];
     }
@@ -1166,7 +1794,7 @@ class OperationTest extends TestCase
 
         $this->app->instance(MaintenanceLock::class, $this->getFakeMaintenanceLock());
         \App\Jobs\DispatchOperationJob::dispatch($response->json('data.id'));
-        $attempt = OperationAttempt::firstOrFail();
+        $attempt = OperationAttempt::where('operation_id', $response->json('data.id'))->firstOrFail();
         $jobId = $attempt->connector_job_id;
 
         $this->withHeaders(['Authorization' => 'Bearer ' . $token])

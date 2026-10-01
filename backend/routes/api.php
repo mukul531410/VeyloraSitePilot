@@ -49,6 +49,7 @@ Route::prefix('v1')->group(function (): void {
 
         Route::post('/sites/{site}/operations', [OperationsController::class, 'store']);
         Route::get('/sites/{site}/operations/{operation}', [OperationsController::class, 'show']);
+        Route::post('/operations/{operation}/retry', [OperationsController::class, 'retry']);
     });
 
     Route::middleware('connector')->group(function (): void {
