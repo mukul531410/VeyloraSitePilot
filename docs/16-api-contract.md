@@ -80,6 +80,10 @@ POST /operations/{operation}/resolve-unknown
 `POST /operations/{operation}/resolve-unknown` requires an authenticated organization owner or admin and accepts `{ "resolution": "success|failed|cancelled", "reason": "..." }`. It is valid only for an operation in `unknown` with evidence of an accepted/executing timeout. The response includes both `status` and `resolution`: `success` records the operator disposition while status remains `unknown`; `failed` sets status `failed`; and `cancelled` sets status `cancelled`. Only authoritative remote verification can set status `succeeded`. The endpoint records an audit event without fabricating connector verification, attempts, results, or jobs. Invalid state and insufficient evidence return HTTP 409; validation errors return HTTP 422.
 
 ### Automation
+
+Rule and run persistence is defined for Phase 3 Foundation. The endpoints
+below remain planned and are not implemented by the schema/models checkpoint.
+
 GET /automation/rules
 POST /automation/rules
 GET /automation/rules/{rule}
@@ -88,11 +92,67 @@ DELETE /automation/rules/{rule}
 
 GET /automation/runs
 GET /automation/runs/{run}
+POST /automation/runs/{run}/recover
+
+`GET /automation/runs/{run}` reports one run, its immutable intent snapshot, the
+latest recovery record, the linked Operation, any Operation candidate found by
+the original idempotency key, and an execution-evidence summary. It is read-only
+and requires an active membership in the run's active organization with an active
+site. Cross-tenant runs return HTTP 404.
+
+`POST /automation/runs/{run}/recover` recovers a **stranded automation run** only:
+`AutomationRun.status` is `evaluating` and `operation_id` is NULL. It requires
+`auth:sanctum`, an authenticated organization owner or admin of the run's
+organization with an active site, and a non-empty `Idempotency-Key` header. The
+body is `{ "action": "link|re_evaluate|abandon", "reason": "..." }`; `abandon`
+requires a non-empty reason. The server never accepts `operation_id` or any
+tenant field from the client.
+
+- `link` is allowed only when immutable `automation_operation_origins` already
+  proves the Operation belongs to the run. It never creates or repairs
+  provenance, and it never dispatches, retries or approves. After linking, the
+  existing reconciliation service mirrors authoritative Operation state; unknown
+  remains unknown.
+- `re_evaluate` is allowed only when there is no Operation, provenance,
+  execution evidence or Operation lifecycle audit for the original request. It
+  re-checks the original requester, organization, site, connector connection,
+  capability, current policy and current approval requirement live, then calls
+  OperationService exactly once as the original requester using the original
+  snapshotted idempotency key. No successor run and no new key are created. HTTP
+  202 is returned because an Operation was submitted.
+- `abandon` is allowed only when the automation intent was never submitted. It
+  requires an authorized actor and a non-empty reason, sets the run to
+  `abandoned`, and never modifies an Operation. Abandonment records that the
+  intent was not submitted; it does not claim that a WordPress operation failed.
+  `abandoned` is distinct from `cancelled`.
+
+Responses use the standard envelope. HTTP 404 covers cross-tenant access, HTTP
+403 an unauthorized actor or a current policy denial, HTTP 409 an unsatisfied
+precondition, provenance conflict, or another active recovery for the same run,
+HTTP 422 a validation failure, and HTTP 200 `link`/`abandon`. Recovery state is
+separate from `AutomationRun.status`: the run stays `evaluating` while a recovery
+is requested, authorized or blocked, and recovery states are `none`, `requested`,
+`authorized`, `in_progress`, `linked`, `submitted`, `awaiting_approval`,
+`blocked`, `conflict`, and `abandoned`.
+
+There is no public reconciliation API in this checkpoint. Operators can
+manually invoke the backend `sitepilot:automation-reconcile` command; it reads
+Operation state and mirrors it to eligible linked runs without creating an
+Operation or dispatching connector work.
 
 ### Approvals
-GET /approvals
 POST /approvals/{approval}/approve
 POST /approvals/{approval}/reject
+
+Approval actions require `auth:sanctum`. The reviewer must be an active member
+of the active organization with an active site and the owner/admin role; the
+requester cannot review their own operation. Rejection requires a non-empty
+reason. Both actions use OperationService for state changes and audit records.
+Reviewing an expired pending request marks it expired and cancels its operation;
+the API returns HTTP 409.
+This is the MVP role contract because `site.approve` is not defined in the
+executable permission schema. Approval endpoints do not cause automation to
+approve requests.
 
 ### Notifications
 GET /notifications

@@ -91,6 +91,21 @@ Only now create the local WordPress test environment.
 - retries
 - locking
 
+### Phase 3 — Automation Foundation (current implementation workstream)
+
+This workstream preserves the historical Phase 6 roadmap numbering above.
+Checkpoint A added automation rule/run persistence and models. Checkpoint B
+adds UTC interval occurrence validation/key generation, unique-key collision
+resolution, and short-transaction claiming. The MVP supports scheduled rules
+for `action.cache_clear`, nullable conditions with non-null conditions
+unsupported, one run to zero-or-one Operation, and unique per-rule occurrence
+keys. The run status vocabulary is `pending`,
+`evaluating`, `awaiting_approval`, `submitted`, `completed`, `failed`, and
+`skipped`. Checkpoint C adds latest-due occurrence discovery and a manual
+command that creates/reuses and claims runs without Operation submission. The
+command is not registered with recurring scheduling. APIs, approval APIs, and
+execution orchestration remain subsequent checkpoints.
+
 ## Phase 7 — AI
 - summaries
 - diagnosis assistance

@@ -206,6 +206,6 @@ class PolicyEngine
 
     private function generateCorrelationId(): string
     {
-        return \Illuminate\Support\Str::uuid()->toString();
+        return \Illuminate\Support\Str::ulid()->toString();
     }
 }

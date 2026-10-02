@@ -88,10 +88,65 @@ id, operation_id, operation_attempt_id, connector_job_id, result_status, cache_c
 
 ## Automation
 ### automation_rules
-id, organization_id, site_id nullable, name, enabled, trigger_type, conditions_json, action_type, action_config_json, approval_policy, retry_policy_json, schedule_json, created_at, updated_at
+id, organization_id, site_id, name, enabled, trigger_type, schedule_json, conditions_json nullable, action_type, target_json, created_by, created_at, updated_at
+
+Phase 3 Foundation MVP supports `trigger_type: schedule` and
+`action_type: action.cache_clear`. `conditions_json` is nullable; non-null
+conditions are unsupported until a condition contract is defined. The
+supported `schedule_json` shape is exactly `{"every_minutes": positive
+integer, "starts_at_utc": "YYYY-MM-DDTHH:MM:SSZ"}`. Occurrences are the UTC
+anchor plus non-negative integer multiples of the interval.
 
 ### automation_runs
-id, automation_rule_id, site_id, status, trigger_payload_json, started_at, finished_at, created_at
+id, automation_rule_id, organization_id, site_id, operation_id nullable, occurrence_key, status, evaluation_metadata_json nullable, failure_code nullable, failure_message nullable, started_at nullable, finished_at nullable, created_at, updated_at
+
+An automation run references at most one operation. The database enforces
+unique non-null `operation_id` and unique `(automation_rule_id, occurrence_key)` for durable occurrence
+deduplication. Run statuses are `pending`, `evaluating`, `awaiting_approval`,
+`submitted`, `completed`, `failed`, `skipped`, `unknown`, `cancelled`, and
+`abandoned`; they do not replace the
+authoritative operation lifecycle. `abandoned` is a terminal run status reachable
+only from `evaluating` and records that an automation intent was never submitted;
+it is distinct from `cancelled` and never implies a remote operation failure.
+Occurrence keys use
+`schedule:v1:YYYY-MM-DDTHH:MM:SSZ` normalized to UTC and are unique per rule.
+For a given evaluation time, the scheduler resolves only the latest due
+occurrence. Older missed occurrences do not create runs or receive later
+backfill.
+
+### automation_run_intents
+id, automation_run_id unique, intent_version, captured_at, organization_id, site_id, automation_rule_id, occurrence_key, original_operation_type, original_target_json, original_requester_id, original_idempotency_key, policy_context_snapshot, created_at, updated_at
+
+One immutable historical intent belongs to each newly-created run. Its run,
+tenant, rule, and requester foreign keys restrict deletion. Existing runs are
+not backfilled from a rule's current state.
+
+### automation_operation_origins
+id, automation_run_id unique, operation_id unique, site_id, organization_id, linked_at, version, created_at, updated_at
+
+The immutable origin proves which run created an Operation. Run and Operation
+foreign keys restrict deletion. Service validation requires its site and
+organization to agree with both records; unique run and Operation keys prevent
+either side from being linked twice. It must agree with
+`automation_runs.operation_id`. An origin may exist for a run whose
+`operation_id` is still NULL; that is the stranded state that the `link` recovery
+action resolves, and provenance is never created or repaired to force a link.
+
+### automation_run_recoveries
+id, automation_run_id, organization_id, site_id, actor_id, action, request_idempotency_key, reason nullable, state, active_automation_run_id nullable, failure_reason nullable, result_metadata_json nullable, requested_at, authorized_at nullable, started_at nullable, completed_at nullable, created_at, updated_at
+
+Recovery state is stored separately from `automation_runs.status`, so a run stays
+`evaluating` while a recovery is requested, authorized, in progress or blocked.
+`action` is `link`, `re_evaluate`, or `abandon`; `state` is `requested`,
+`authorized`, `in_progress`, `linked`, `submitted`, `awaiting_approval`,
+`blocked`, `conflict`, or `abandoned`, and the absence of any record is `none`.
+`active_automation_run_id` uniquely claims the run for an in-flight or
+successful attempt, and is NULL for `blocked` and `conflict` so a refused attempt
+releases the run and a later legitimate attempt remains possible. The unique
+index on that nullable column is the database-level guarantee of at most one
+active recovery per run; because most SQL engines allow repeated NULL values in a
+unique index, arbitrarily many refused attempts may be recorded. Run, tenant, and
+actor foreign keys restrict deletion.
 
 ### approval_requests
 id, organization_id, site_id, operation_id, status, requested_by, reviewed_by, reason, expires_at, reviewed_at, created_at

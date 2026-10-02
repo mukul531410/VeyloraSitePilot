@@ -138,6 +138,11 @@ class Operation extends Model
         return $this->hasOne(ApprovalRequest::class);
     }
 
+    public function automationOperationOrigin(): HasOne
+    {
+        return $this->hasOne(AutomationOperationOrigin::class);
+    }
+
     public function recoveryOf(): BelongsTo
     {
         return $this->belongsTo(self::class, 'recovery_of_operation_id');

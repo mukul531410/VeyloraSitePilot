@@ -58,6 +58,11 @@ Process:
 6. Determine whether approval is required.
 7. Create operation.
 8. Queue only if authorized.
+
+For the Phase 3 scheduled automation slice, a newly claimed run reauthorizes
+its rule creator, then requests `action.cache_clear` through OperationService
+with the deterministic key `automation:run:{run_ulid}:operation:v1`. Approval
+requirements remain in force; the automation layer never approves the request.
 9. Execute through connector capability.
 10. Verify expected result.
 11. Record outcome.

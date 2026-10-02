@@ -2,17 +2,19 @@
 
 namespace App\Services;
 
+use App\Exceptions\OperationPolicyDeniedException;
 use App\Models\ApprovalRequest;
 use App\Models\AuditLog;
+use App\Models\AutomationOperationOrigin;
+use App\Models\AutomationRun;
 use App\Models\Operation;
-use App\Models\OperationAttempt;
-use App\Models\OperationResult;
 use App\Models\Site;
 use App\Models\User;
-use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use RuntimeException;
 
 class OperationService
@@ -28,14 +30,25 @@ class OperationService
         string $operationType,
         array $targetJson,
         string $idempotencyKey,
+        ?AutomationRun $automationRun = null,
     ): Operation {
+        if ($automationRun === null && str_starts_with($idempotencyKey, 'automation:run:')) {
+            throw new InvalidArgumentException('Automation idempotency keys are reserved for server-created automation operations.');
+        }
+
         try {
-            return DB::transaction(function () use ($user, $site, $operationType, $targetJson, $idempotencyKey) {
-                $existing = Operation::where('site_id', $site->id)
-                    ->where('idempotency_key', $idempotencyKey)
-                    ->first();
+            return DB::transaction(function () use ($user, $site, $operationType, $targetJson, $idempotencyKey, $automationRun) {
+                $existingQuery = Operation::where('idempotency_key', $idempotencyKey);
+                if ($automationRun === null) {
+                    $existingQuery->where('site_id', $site->id);
+                }
+                $existing = $existingQuery->first();
 
                 if ($existing) {
+                    if ($automationRun !== null) {
+                        $this->assertExistingAutomationOrigin($existing, $user, $site, $operationType, $targetJson, $idempotencyKey, $automationRun);
+                    }
+
                     return $this->returnExistingOrRejectConflict($existing, $operationType, $targetJson);
                 }
 
@@ -44,7 +57,7 @@ class OperationService
                 );
 
                 if (! $policyEvaluation['allowed']) {
-                    throw new \App\Exceptions\OperationPolicyDeniedException(
+                    throw new OperationPolicyDeniedException(
                         'Operation denied by policy',
                         $policyEvaluation['checks'],
                         $policyEvaluation['policy_result']
@@ -63,6 +76,10 @@ class OperationService
                     'idempotency_key' => $idempotencyKey,
                     'requested_by' => $user->id,
                 ]);
+
+                if ($automationRun !== null) {
+                    $this->createAutomationOrigin($automationRun, $operation);
+                }
 
                 $this->auditLog(
                     $operation,
@@ -104,6 +121,9 @@ class OperationService
                 $operationType,
                 $targetJson,
                 $idempotencyKey,
+                $automationRun,
+                $user,
+                $site,
             );
         }
     }
@@ -114,21 +134,73 @@ class OperationService
         string $operationType,
         array $targetJson,
         string $idempotencyKey,
+        ?AutomationRun $automationRun = null,
+        ?User $user = null,
+        ?Site $site = null,
     ): Operation {
         if (! $this->isOperationIdempotencyUniqueViolation($exception)) {
             throw $exception;
         }
 
-        $existing = Operation::query()
-            ->where('site_id', $siteId)
-            ->where('idempotency_key', $idempotencyKey)
-            ->first();
+        $existingQuery = Operation::query()->where('idempotency_key', $idempotencyKey);
+        if ($automationRun === null) {
+            $existingQuery->where('site_id', $siteId);
+        }
+        $existing = $existingQuery->first();
 
         if ($existing === null) {
             throw $exception;
         }
 
+        if ($automationRun !== null && $user !== null && $site !== null) {
+            $this->assertExistingAutomationOrigin($existing, $user, $site, $operationType, $targetJson, $idempotencyKey, $automationRun);
+        }
+
         return $this->returnExistingOrRejectConflict($existing, $operationType, $targetJson);
+    }
+
+    private function createAutomationOrigin(AutomationRun $run, Operation $operation): void
+    {
+        $operation->loadMissing('site.organization');
+        if ((string) $run->site_id !== (string) $operation->site_id
+            || (string) $run->organization_id !== (string) $operation->site->organization_id) {
+            throw new RuntimeException('Automation operation origin scope mismatch.');
+        }
+
+        AutomationOperationOrigin::query()->create([
+            'automation_run_id' => $run->id,
+            'operation_id' => $operation->id,
+            'site_id' => $run->site_id,
+            'organization_id' => $run->organization_id,
+            'linked_at' => now('UTC'),
+            'version' => 1,
+        ]);
+    }
+
+    private function assertExistingAutomationOrigin(
+        Operation $operation,
+        User $user,
+        Site $site,
+        string $operationType,
+        array $targetJson,
+        string $idempotencyKey,
+        AutomationRun $run,
+    ): void {
+        $origin = AutomationOperationOrigin::query()->where('operation_id', $operation->id)->first();
+        $operation->loadMissing('site.organization');
+        if ($origin === null
+            || (string) $origin->automation_run_id !== (string) $run->id
+            || (string) $origin->site_id !== (string) $site->id
+            || (string) $origin->organization_id !== (string) $run->organization_id
+            || (string) $run->site_id !== (string) $site->id
+            || (string) $operation->site_id !== (string) $site->id
+            || (string) $operation->site->organization_id !== (string) $run->organization_id
+            || $operation->operation_type !== $operationType
+            || $operation->target_json !== $targetJson
+            || (string) $operation->requested_by !== (string) $user->id
+            || $operation->idempotency_key !== $idempotencyKey) {
+            throw new RuntimeException('Idempotency conflict: automation operation provenance mismatch');
+        }
     }
 
     protected function isOperationIdempotencyUniqueViolation(QueryException $exception): bool
@@ -192,8 +264,7 @@ class OperationService
         }
 
         if ($approvalRequest->isExpired()) {
-            $approvalRequest->update(['status' => ApprovalRequest::STATUS_EXPIRED]);
-            $approvalRequest->operation->update(['status' => Operation::STATUS_CANCELLED]);
+            $this->expireApprovalRequest($approvalRequest);
             throw new RuntimeException('Approval request has expired');
         }
 
@@ -216,7 +287,7 @@ class OperationService
                 $reviewer,
                 ['status' => 'pending'],
                 ['status' => 'approved'],
-                Str::uuid()->toString()
+                Str::ulid()->toString()
             );
 
             return $operation->fresh();
@@ -231,6 +302,11 @@ class OperationService
 
         if ($approvalRequest->requested_by === $reviewer->id) {
             throw new RuntimeException('Self-rejection is not allowed');
+        }
+
+        if ($approvalRequest->isExpired()) {
+            $this->expireApprovalRequest($approvalRequest);
+            throw new RuntimeException('Approval request has expired');
         }
 
         return DB::transaction(function () use ($approvalRequest, $reviewer, $reason) {
@@ -253,10 +329,27 @@ class OperationService
                 $reviewer,
                 ['status' => 'pending'],
                 ['status' => 'rejected', 'reason' => $reason],
-                Str::uuid()->toString()
+                Str::ulid()->toString()
             );
 
             return $operation->fresh();
+        });
+    }
+
+    private function expireApprovalRequest(ApprovalRequest $approvalRequest): void
+    {
+        DB::transaction(function () use ($approvalRequest): void {
+            $lockedApproval = ApprovalRequest::query()
+                ->whereKey($approvalRequest->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if (! $lockedApproval->isPending()) {
+                return;
+            }
+
+            $lockedApproval->update(['status' => ApprovalRequest::STATUS_EXPIRED]);
+            $lockedApproval->operation()->update(['status' => Operation::STATUS_CANCELLED]);
         });
     }
 
@@ -269,7 +362,7 @@ class OperationService
         return $site->operations()->where('id', $operationId)->first();
     }
 
-    public function getOperationsForSite(User $user, Site $site): \Illuminate\Database\Eloquent\Collection
+    public function getOperationsForSite(User $user, Site $site): Collection
     {
         if (! $user->organizations()->whereHas('sites', fn ($q) => $q->whereKey($site->id))->exists()) {
             return collect();

@@ -51,6 +51,21 @@ The scheduler queues an expired-attempt detector every minute. It rechecks `time
 
 For a safe dispatched timeout, the detector queues the same operation for `DispatchOperationJob`; the job rechecks retry preconditions and stored `max_attempts` while holding the operation lock. Queue dispatch failures leave the operation queued for the periodic dispatcher to recover. If the attempt cap is exhausted, the operation becomes dead-lettered; if a precondition fails, no new attempt is created. Accepted/executing timeouts become `unknown` and are never automatically retried. SQLite tests cover deterministic transitions but do not verify production MySQL locking behavior.
 
+### Automation run reconciliation (Checkpoint G2)
+
+The manually invokable `sitepilot:automation-reconcile` command reads linked
+Operation rows and mirrors their authoritative statuses into guarded
+AutomationRun transitions. It uses a transaction and locks/re-reads the run
+and Operation; it performs no remote work and is not registered for recurring
+scheduling. It never calls OperationService, OperationRecoveryService,
+connector APIs, or operation dispatch jobs. Repeated unchanged reconciliation
+does not write duplicate transition audits. Runs in `evaluating` without an
+Operation are reported as stranded and left untouched; G2 does not retry or
+recover them. The standard PHPUnit configuration uses SQLite and does not
+exercise simultaneous MySQL workers. The opt-in MySQL concurrency feature test
+verified that two command processes wait on the same run lock and produce one
+transition audit after release.
+
 ### Unknown operator resolution (Phase 2E)
 
 An `unknown` operation means the connector may have executed a remote mutation but SitePilot lacks conclusive outcome evidence. Automated dispatch and recovery must not retry it. An authenticated organization owner or admin can submit `POST /api/v1/operations/{operation}/resolve-unknown` with a required reason and `success`, `failed`, or `cancelled` resolution. The service locks and rechecks the operation, preserves attempts and results, and audits `operation_unknown_resolved`. Operator `success` leaves operation status `unknown` and records the disposition separately; only authoritative remote verification sets status `succeeded`. Operator `failed` and `cancelled` use their corresponding terminal statuses. Resolution creates no connector verification evidence, attempt, job, or recovery successor. All other transitions from unknown are rejected.

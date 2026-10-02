@@ -1,5 +1,108 @@
 # Veylora SitePilot — Master Specification v1.0
 
+## Phase 3 Automation Foundation — Checkpoint A
+
+The persistence foundation supports scheduled automation rules for the
+existing `action.cache_clear` operation only. Conditions are optional;
+`conditions_json: null` means none is configured, while non-null conditions
+are unsupported pending a separate condition contract. Each run references
+zero or one Operation, and `(automation_rule_id, occurrence_key)` is unique.
+Automation run statuses are `pending`, `evaluating`, `awaiting_approval`,
+`submitted`, `completed`, `failed`, and `skipped`; Operation status remains
+authoritative for mutation execution. Checkpoint A does not implement schedule
+resolution, run execution, APIs, approval APIs, or notifications.
+
+## Phase 3 Automation Foundation — Checkpoint B
+
+The supported schedule is an interval in UTC anchored by
+`starts_at_utc`, represented as `{"every_minutes": positive integer,
+"starts_at_utc": "YYYY-MM-DDTHH:MM:SSZ"}`. The occurrence key is
+`schedule:v1:YYYY-MM-DDTHH:MM:SSZ` after UTC normalization. Database uniqueness
+on `(automation_rule_id, occurrence_key)` prevents duplicate runs; repeated
+creation returns the existing run. Claiming uses a locked transaction to move
+only `pending` to `evaluating`. No scheduler or operation execution is added.
+
+## Phase 3 Automation Foundation — Checkpoint C
+
+Due resolution accepts an explicit evaluation timestamp and chooses only the
+latest scheduled occurrence at or before that time. Older missed occurrences
+are not backfilled. The scheduler service calls the existing run creation and
+claim services, reports skipped/ineligible rules, and does not submit an
+Operation. The `sitepilot:automation-schedule` command accepts `--at` and is
+not registered as a recurring task.
+
+## Phase 3 Automation Foundation — Checkpoint G1
+
+Newly claimed runs are evaluated by `AutomationRunEvaluationService`, which
+reauthorizes the rule creator and submits only `action.cache_clear` through
+OperationService. The deterministic site-scoped idempotency key is
+`automation:run:{run_ulid}:operation:v1`. Operation creation, unique run link,
+and immediate run-state update share a database transaction. Approval remains
+pending for a human reviewer. Immediate operation states map to the run states
+documented in `docs/09-automation-engine.md`; asynchronous reconciliation and
+connector execution are not implemented in automation.
+
+New occurrence creation atomically captures one immutable intent snapshot with
+the original requester, action, target, idempotency key, tenant/rule scope,
+occurrence and policy context. Duplicate occurrence reuse never replaces that
+snapshot. Legacy runs without intent are incomplete for future recovery and
+are not reconstructed from current rule state. G1 Operation creation also
+inserts an immutable `automation_operation_origins` provenance record in the
+same transaction as the run link, run state transition and evaluation audit.
+The deterministic idempotency key is not proof of provenance; existing
+Operations are accepted only with a matching origin and validated scope,
+action, target, requester and key.
+
+## Phase 3 Automation Foundation — Checkpoint F
+
+The MVP scheduled requester is the rule creator, whose active user status,
+organization membership, organization/site status and scope, and owner/admin
+`site.operate` fallback must be rechecked when a run is evaluated. The rule
+does not preserve authorization after the creator loses it. Approval review
+uses authenticated approve/reject endpoints for active owner/admin members;
+self-review is denied and state changes/audits remain in OperationService.
+Automation never approves its own requests.
+
+Automation run statuses include `unknown` and `cancelled` for future
+reconciliation. The scheduler still only performs `pending → evaluating`;
+no automatic recovery worker is added here. A non-null
+`automation_runs.operation_id` is unique, and the G1 evaluator validates scope,
+action, target, requester, idempotency key, and immutable provenance before
+linking.
+
+## Phase 3 Automation Foundation — Checkpoint G2
+
+`AutomationRunReconciliationService` transactionally reads the linked
+Operation under row locks, validates its site, organization, and run-derived
+idempotency identity, then applies the approved Operation-to-run mapping via
+guarded transitions. Operation is authoritative: only `succeeded` completes
+the run; `unknown` remains uncertain (including an operator success
+disposition); `cancelled` remains cancelled; and `dead_letter` maps to failed.
+Reconciliation audits actual transitions and deduplicates unchanged conflict
+reports. A terminal transition conflict is rejected and reported without
+reopening the run.
+
+The manual `sitepilot:automation-reconcile` command includes linked runs for
+state reconciliation and consistency checks. It reports `evaluating` runs with
+no Operation as stranded and leaves them unchanged. It never creates or retries
+an Operation, invokes operation recovery, or dispatches connector execution.
+The command is not automatically scheduled. PHPUnit uses SQLite, so actual
+concurrent MySQL locking is covered by a separate opt-in integration test; two
+workers serialized on one run row and produced one transition audit.
+
+Recovery of a stranded run is a separate explicit operator workflow, not part of
+reconciliation and not part of Operation retry or unknown resolution. It applies
+only to a run that is `evaluating` with no linked Operation, keeps run status at
+`evaluating` while the attempt is requested, authorized or blocked, and stores its
+own durable state machine in `automation_run_recoveries`. The only actions are
+`link` through immutable `automation_operation_origins`, `re_evaluate` from the
+immutable intent snapshot by the original requester and original idempotency key,
+and `abandon` of an intent that was never submitted. Every one of them fails
+closed when any evidence suggests a remote action may already have happened, and
+abandonment never claims that a WordPress operation failed. An operator recovers
+at most one run at a time, duplicate request keys replay safely, and a different
+concurrent request conflicts.
+
 ## Status
 Architecture baseline approved for implementation.
 

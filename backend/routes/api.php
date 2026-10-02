@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\Api\ApprovalsController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AutomationRunsController;
 use App\Http\Controllers\Api\ConnectorController;
 use App\Http\Controllers\Api\OperationsController;
 use App\Http\Controllers\Api\OrganizationController;
@@ -51,6 +53,11 @@ Route::prefix('v1')->group(function (): void {
         Route::get('/sites/{site}/operations/{operation}', [OperationsController::class, 'show']);
         Route::post('/operations/{operation}/retry', [OperationsController::class, 'retry']);
         Route::post('/operations/{operation}/resolve-unknown', [OperationsController::class, 'resolveUnknown']);
+        Route::post('/approvals/{approval}/approve', [ApprovalsController::class, 'approve']);
+        Route::post('/approvals/{approval}/reject', [ApprovalsController::class, 'reject']);
+
+        Route::get('/automation/runs/{run}', [AutomationRunsController::class, 'show']);
+        Route::post('/automation/runs/{run}/recover', [AutomationRunsController::class, 'recover']);
     });
 
     Route::middleware('connector')->group(function (): void {
