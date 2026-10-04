@@ -53,6 +53,9 @@ Route::prefix('v1')->group(function (): void {
 
         Route::post('/sites/{site}/operations', [OperationsController::class, 'store']);
         Route::get('/sites/{site}/operations/{operation}', [OperationsController::class, 'show']);
+        Route::get('/operations', [OperationsController::class, 'index']);
+        Route::get('/operations/{operation}', [OperationsController::class, 'showOperation']);
+        Route::post('/operations/{operation}/cancel', [OperationsController::class, 'cancel']);
         Route::post('/operations/{operation}/retry', [OperationsController::class, 'retry']);
         Route::post('/operations/{operation}/resolve-unknown', [OperationsController::class, 'resolveUnknown']);
         Route::post('/approvals/{approval}/approve', [ApprovalsController::class, 'approve']);

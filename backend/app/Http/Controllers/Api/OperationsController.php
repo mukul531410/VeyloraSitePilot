@@ -2,16 +2,19 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\OperationCancellationException;
 use App\Exceptions\OperationPolicyDeniedException;
 use App\Exceptions\OperationRecoveryChainException;
 use App\Exceptions\OperationRecoveryException;
 use App\Exceptions\OperationUnknownResolutionException;
+use App\Http\Requests\CancelOperationRequest;
 use App\Http\Requests\ResolveUnknownOperationRequest;
 use App\Http\Requests\RetryOperationRequest;
 use App\Http\Requests\StoreOperationRequest;
 use App\Models\Operation;
 use App\Models\Site;
 use App\Models\User;
+use App\Services\OperationCancellationService;
 use App\Services\OperationRecoveryService;
 use App\Services\OperationService;
 use App\Services\OperationUnknownResolutionService;
@@ -22,6 +25,7 @@ class OperationsController extends BaseController
 {
     public function __construct(
         private OperationService $operationService,
+        private OperationCancellationService $operationCancellationService,
         private OperationRecoveryService $operationRecoveryService,
         private OperationUnknownResolutionService $operationUnknownResolutionService,
     ) {}
@@ -77,6 +81,166 @@ class OperationsController extends BaseController
 
         return $this->successResponse(
             $this->transformOperation($operation)
+        );
+    }
+
+    /**
+     * The active-membership scope shared by every operation-level operator
+     * endpoint: an operation outside the actor's active organization sites is
+     * simply not found, so the ULID cannot be used to probe another tenant.
+     */
+    private function visibleOperationsQuery(User $actor)
+    {
+        return Operation::query()
+            ->whereHas('site', function ($siteQuery) use ($actor): void {
+                $siteQuery->where('status', 'active')
+                    ->whereHas('organization', function ($organizationQuery) use ($actor): void {
+                        $organizationQuery->where('status', 'active')
+                            ->whereHas('members', function ($memberQuery) use ($actor): void {
+                                $memberQuery->where('user_id', $actor->id)
+                                    ->where('status', 'active');
+                            });
+                    });
+            });
+    }
+
+    public function index(Request $request)
+    {
+        /** @var User $actor */
+        $actor = $request->user();
+
+        $query = $this->visibleOperationsQuery($actor);
+
+        $siteId = $request->query('site_id');
+        if (is_string($siteId) && $siteId !== '') {
+            $query->where('site_id', $siteId);
+        }
+
+        $status = $request->query('status');
+        if (is_string($status) && $status !== '') {
+            $query->where('status', $status);
+        }
+
+        // Deterministic ordering: id is the ULID tiebreaker for equal timestamps.
+        $operations = $query->orderByDesc('created_at')->orderByDesc('id')->paginate($this->perPage($request));
+
+        return $this->successResponse(
+            $operations->getCollection()
+                ->map(fn (Operation $operation) => $this->transformOperation($operation))
+                ->values()
+                ->all(),
+            $this->paginationMeta($operations)
+        );
+    }
+
+    public function showOperation(Request $request, string $operation)
+    {
+        /** @var User $actor */
+        $actor = $request->user();
+        $source = $this->visibleOperationsQuery($actor)->find($operation);
+
+        if ($source === null) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        $source->load(['attempts', 'latestAttempt', 'result', 'approvalRequest']);
+
+        return $this->successResponse($this->transformOperation($source));
+    }
+
+    public function cancel(CancelOperationRequest $request, string $operation)
+    {
+        /** @var User $actor */
+        $actor = $request->user();
+        $source = $this->visibleOperationsQuery($actor)->find($operation);
+
+        if ($source === null) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        try {
+            $cancelled = $this->operationCancellationService->cancel(
+                $actor,
+                $source,
+                $request->validated('reason'),
+                $request->header('X-Request-ID'),
+                $source->site,
+            );
+        } catch (OperationCancellationException $exception) {
+            return $this->cancellationExceptionResponse($exception);
+        }
+
+        $cancelled->load(['latestAttempt', 'result', 'approvalRequest']);
+
+        return $this->successResponse($this->transformOperation($cancelled));
+    }
+
+    private function perPage(Request $request): int
+    {
+        $requested = $request->query('per_page');
+
+        if (! is_numeric($requested)) {
+            return 25;
+        }
+
+        return max(1, min(100, (int) $requested));
+    }
+
+    private function cancellationExceptionResponse(OperationCancellationException $exception)
+    {
+        if (in_array($exception->reason, OperationCancellationException::UNAUTHORIZED_REASONS, true)) {
+            return $this->errorResponse('Unauthorized', 'unauthorized', 403);
+        }
+
+        if ($exception->reason === OperationCancellationException::WRONG_TENANT) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        if ($exception->reason === OperationCancellationException::OPERATION_MISSING) {
+            return $this->errorResponse('Operation not found', 'not_found', 404);
+        }
+
+        if ($exception->reason === OperationCancellationException::MISSING_REASON) {
+            return $this->errorResponse(
+                'Reason is required for cancellation',
+                'validation_error',
+                422,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationCancellationException::OPERATION_APPROVAL_PENDING) {
+            return $this->errorResponse(
+                'Operation has a pending approval request; reject the approval to cancel it',
+                'operation_approval_pending',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationCancellationException::ALREADY_CANCELLED) {
+            return $this->errorResponse(
+                'Operation is already cancelled',
+                'already_cancelled',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        if ($exception->reason === OperationCancellationException::OPERATION_TERMINAL) {
+            return $this->errorResponse(
+                'Operation has already reached a terminal state',
+                'operation_terminal',
+                409,
+                ['reason' => $exception->reason],
+            );
+        }
+
+        return $this->errorResponse(
+            'Operation is already in flight; resolve the unknown operation instead',
+            'operation_in_flight',
+            409,
+            ['reason' => $exception->reason],
         );
     }
 

@@ -145,6 +145,28 @@ site that has never synced is reported as an empty inventory rather than an erro
 Update *detection* and severity (`available_updates`) and the dashboard frontend
 remain future work.
 
+## Phase 5 — Operations management API
+
+`GET /api/v1/operations`, `GET /api/v1/operations/{operation}` and
+`POST /api/v1/operations/{operation}/cancel` are implemented. Reads require
+active membership in the active organization owning the active site, and an
+operation outside that scope is reported as not found so a ULID cannot be used to
+probe another tenant.
+
+Cancellation is an owner/admin operator disposition that reuses the existing
+terminal `cancelled` state rather than introducing a new state. It is deliberately
+limited to operations that have not started remote work — `requested`, `approved`
+and `queued`. An operation in `running` or `verification_pending` is refused,
+because the connector may already have claimed the job, no connector-side
+cancellation capability exists, and marking it cancelled would assert an outcome
+the system cannot know while causing the connector's later result submission to
+be rejected as `already_terminal`, discarding real evidence. Those operations must
+use the existing `unknown` and `resolve-unknown` workflow instead. An operation
+with a pending approval request is refused as well, because rejecting the approval
+already cancels it. Cancellation never dispatches connector work and is audited as
+`operation_cancelled` with before/after status and `connector_dispatch_claimed:
+false`.
+
 ## Status
 Architecture baseline approved for implementation.
 
