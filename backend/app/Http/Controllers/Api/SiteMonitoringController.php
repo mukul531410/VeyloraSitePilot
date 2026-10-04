@@ -41,6 +41,96 @@ class SiteMonitoringController extends BaseController
         );
     }
 
+    public function inventory(Request $request, Site $site)
+    {
+        if (! $this->authorizeSiteAccess($request, $site)) {
+            return $this->errorResponse('Unauthorized', 'unauthorized', 403);
+        }
+
+        $snapshot = $site->latestInventorySnapshot();
+
+        if ($snapshot === null) {
+            // A site that has never synced is not an error; the dashboard needs to
+            // tell "not synced yet" apart from a failed request.
+            return $this->successResponse([
+                'site_id' => $site->id,
+                'snapshot' => null,
+                'core' => null,
+                'plugins' => [],
+                'themes' => [],
+                'summary' => [
+                    'plugins' => 0,
+                    'active_plugins' => 0,
+                    'plugins_with_updates' => 0,
+                    'themes' => 0,
+                    'active_themes' => 0,
+                    'themes_with_updates' => 0,
+                    'core_update_available' => false,
+                    'updates_available' => 0,
+                ],
+            ]);
+        }
+
+        $snapshot->load(['coreState', 'plugins', 'themes']);
+        $core = $snapshot->coreState;
+        $pluginsWithUpdates = $snapshot->plugins->where('update_available', true)->count();
+        $themesWithUpdates = $snapshot->themes->where('update_available', true)->count();
+        $coreUpdate = (bool) ($core?->update_available);
+
+        return $this->successResponse([
+            'site_id' => $site->id,
+            'snapshot' => [
+                'id' => $snapshot->id,
+                'snapshot_type' => $snapshot->snapshot_type,
+                'status' => $snapshot->status,
+                'checksum' => $snapshot->checksum,
+                'started_at' => $snapshot->started_at?->toIso8601String(),
+                'completed_at' => $snapshot->completed_at?->toIso8601String(),
+            ],
+            'core' => $core === null ? null : [
+                'id' => $core->id,
+                'wordpress_version' => $core->wordpress_version,
+                'php_version' => $core->php_version,
+                'update_available' => (bool) $core->update_available,
+                'status' => $core->status,
+            ],
+            'plugins' => $snapshot->plugins
+                ->sortBy('plugin_key')
+                ->map(fn ($plugin) => [
+                    'id' => $plugin->id,
+                    'key' => $plugin->plugin_key,
+                    'name' => $plugin->name,
+                    'version' => $plugin->version,
+                    'update_available' => (bool) $plugin->update_available,
+                    'active' => (bool) $plugin->active,
+                    'status' => $plugin->status,
+                    'metadata' => $plugin->metadata_json,
+                ])->values()->all(),
+            'themes' => $snapshot->themes
+                ->sortBy('theme_key')
+                ->map(fn ($theme) => [
+                    'id' => $theme->id,
+                    'key' => $theme->theme_key,
+                    'name' => $theme->name,
+                    'version' => $theme->version,
+                    'update_available' => (bool) $theme->update_available,
+                    'active' => (bool) $theme->active,
+                    'status' => $theme->status,
+                    'metadata' => $theme->metadata_json,
+                ])->values()->all(),
+            'summary' => [
+                'plugins' => $snapshot->plugins->count(),
+                'active_plugins' => $snapshot->plugins->where('active', true)->count(),
+                'plugins_with_updates' => $pluginsWithUpdates,
+                'themes' => $snapshot->themes->count(),
+                'active_themes' => $snapshot->themes->where('active', true)->count(),
+                'themes_with_updates' => $themesWithUpdates,
+                'core_update_available' => $coreUpdate,
+                'updates_available' => $pluginsWithUpdates + $themesWithUpdates + (int) $coreUpdate,
+            ],
+        ]);
+    }
+
     public function metrics(Request $request, Site $site)
     {
         if (! $this->authorizeSiteAccess($request, $site)) {

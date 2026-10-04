@@ -68,6 +68,15 @@ GET /sites/{site}/metrics
 GET /sites/{site}/incidents
 GET /sites/{site}/tasks
 
+`GET /sites/{site}/inventory` is implemented and reports the site's newest
+**completed** inventory snapshot: `snapshot` (id, type, status, checksum,
+timestamps), `core` (WordPress/PHP version and core update availability),
+`plugins`, `themes`, and a `summary` with counts and `updates_available`. A site
+that has never synced is HTTP 200 with `snapshot`/`core` `null` and empty arrays,
+so the dashboard can tell "not synced yet" from a failed request. It requires
+membership in the site's organization.
+POST /sites/{site}/tasks
+
 ### Operations
 GET /operations
 POST /operations
@@ -225,6 +234,38 @@ POST /connector/telemetry
 POST /connector/jobs/{job}/result
 POST /connector/jobs/{job}/state
 GET /connector/jobs
+
+`POST /connector/inventory` is implemented and closes connection lifecycle step
+"initial inventory sync". It requires an authenticated active connector and the
+documented read capability for each section it reports: `read.wordpress` always,
+`read.plugins` when `plugins` is non-empty, and `read.themes` when `themes` is
+non-empty. A missing or disabled capability is HTTP 403 `capability_denied`.
+
+```
+{
+  "started_at": "2026-10-01T10:00:00Z",
+  "completed_at": "2026-10-01T10:00:04Z",
+  "wordpress": { "version": "6.5.2", "php_version": "8.2", "update_available": true, "status": "active" },
+  "plugins": [ { "key": "akismet/akismet", "name": "Akismet", "version": "5.8", "active": true, "update_available": false, "metadata": {} } ],
+  "themes":  [ { "key": "twentytwentyfour", "name": "Twenty Twenty-Four", "version": "1.1", "active": true } ]
+}
+```
+
+The connector never chooses the site: the snapshot is always attributed to the
+authenticated connection's site. Submission is serialized per site with a row
+lock, and each accepted payload writes one immutable `inventory_snapshots` row
+plus its `site_core_states` / `site_plugins` / `site_themes` children; earlier
+snapshots are never overwritten. `completed_at` defaults to arrival time and must
+not precede `started_at`; duplicate component keys inside one payload are HTTP
+422 `invalid_inventory`. A deterministic SHA-256 checksum of the canonical
+payload is stored on the snapshot, so a connector retrying an identical
+submission replays the existing snapshot (HTTP 200, `created: false`) instead of
+writing duplicate history; changed inventory returns HTTP 201 with
+`created: true`.
+
+Inventory is a Level 0 read-only observation. It creates no Operation, claim and
+no remote execution, requires no approval, and is not audited as a privileged
+mutation; the snapshot itself is the durable record.
 
 `POST /connector/jobs/{job}/state` requires an authenticated active connector that owns the site and claimed the job, with the enabled `read.cache_state` capability. It accepts state only when the attempt is `result_received`, the operation is `verification_pending`, and verification is `pending`; the attempt, operation, and result rows are locked for the transition. The authoritative JSON body requires `read_at`, `cache_generation`, `cleared_types`, and `cache_state`; `wp_version` and `connector_version` are optional. The connector does not send `cache_type`; SitePilot uses `target_json.cache_type`, which defaults to `wordpress` for cache-clear operations and rejects other values. For WordPress, `cleared_types` is exactly `object_cache`, `page_cache`, `transient_cache`, `rewrite_cache`, `file_cache`, and `opcache`. `cache_state` must be an object with exactly those six keys, each mapped to `cleared`. The server verifies that `read_at` is no earlier than verification processing start and no later than 60 seconds after it (UTC).
 

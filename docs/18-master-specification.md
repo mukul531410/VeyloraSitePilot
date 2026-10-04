@@ -126,6 +126,25 @@ provenance history must survive; such a rule is retired by disabling it. Rule
 mutations are audited with before/after snapshots and never claim remote
 execution.
 
+## Phase 4 — Inventory sync
+
+`POST /api/v1/connector/inventory` records one immutable inventory snapshot per
+accepted submission, attributed to the authenticated connection's site. It closes
+connection lifecycle step "initial inventory sync" and follows the capability
+model: `read.wordpress` is required for the core section, and `read.plugins` /
+`read.themes` are required only when those sections are reported, so a
+partially-capable connector may report a core-only snapshot. Submission is
+serialized per site under a row lock, and the canonical-payload SHA-256 checksum
+stored on the snapshot makes an identical connector retry replay the existing
+snapshot instead of duplicating history.
+
+Inventory is Level 0 observation. It creates no Operation, needs no approval, and
+never claims remote execution. `GET /api/v1/sites/{site}/inventory` returns the
+newest completed snapshot with core state, plugins, themes and update counts; a
+site that has never synced is reported as an empty inventory rather than an error.
+Update *detection* and severity (`available_updates`) and the dashboard frontend
+remain future work.
+
 ## Status
 Architecture baseline approved for implementation.
 

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Requests\ConnectorHeartbeatRequest;
 use App\Http\Requests\ConnectorRegisterRequest;
+use App\Http\Requests\ConnectorSubmitInventoryRequest;
 use App\Http\Requests\ConnectorSubmitResultRequest;
 use App\Http\Requests\ConnectorSubmitStateRequest;
 use App\Http\Requests\ConnectorTelemetryRequest;
@@ -12,6 +13,7 @@ use App\Models\Operation;
 use App\Models\OperationAttempt;
 use App\Models\OperationResult;
 use App\Models\SiteConnection;
+use App\Services\InventorySubmissionService;
 use App\Services\MaintenanceLock;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -106,6 +108,30 @@ class ConnectorController extends BaseController
             'connection_id' => $connection->id,
             'observations_stored' => count($request->input('observations')),
         ]);
+    }
+
+    public function inventory(ConnectorSubmitInventoryRequest $request, InventorySubmissionService $inventoryService)
+    {
+        /** @var SiteConnection $connection */
+        $connection = $request->attributes->get('connector_connection');
+
+        $submission = $inventoryService->submit($connection, $request->validated());
+
+        if (isset($submission['error'])) {
+            return $this->errorResponse(...$submission['error']);
+        }
+
+        $snapshot = $submission['snapshot'];
+
+        return $this->successResponse([
+            'connection_id' => $connection->id,
+            'site_id' => $snapshot->site_id,
+            'inventory_snapshot_id' => $snapshot->id,
+            'checksum' => $snapshot->checksum,
+            'status' => $snapshot->status,
+            'completed_at' => $snapshot->completed_at?->toIso8601String(),
+            'created' => $submission['created'],
+        ], [], $submission['created'] ? 201 : 200);
     }
 
     public function jobs(Request $request)

@@ -47,6 +47,7 @@ Route::prefix('v1')->group(function (): void {
         Route::delete('/sites/{site}/connections/{connection}', [SiteConnectionController::class, 'destroy']);
 
         Route::get('/sites/{site}/health', [SiteMonitoringController::class, 'health']);
+        Route::get('/sites/{site}/inventory', [SiteMonitoringController::class, 'inventory']);
         Route::get('/sites/{site}/metrics', [SiteMonitoringController::class, 'metrics']);
         Route::get('/sites/{site}/incidents', [SiteMonitoringController::class, 'incidents']);
 
@@ -71,6 +72,7 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/connector/heartbeat', [ConnectorController::class, 'heartbeat']);
         Route::get('/connector/capabilities', [ConnectorController::class, 'capabilities']);
         Route::post('/connector/telemetry', [ConnectorController::class, 'telemetry']);
+        Route::post('/connector/inventory', [ConnectorController::class, 'inventory']);
         Route::get('/connector/jobs', [ConnectorController::class, 'jobs']);
         Route::post('/connector/jobs/{job}/claim', [ConnectorController::class, 'claimJob']);
         Route::post('/connector/jobs/{job}/result', [ConnectorController::class, 'submitResult']);

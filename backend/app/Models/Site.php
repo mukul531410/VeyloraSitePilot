@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -67,6 +67,35 @@ class Site extends Model
     public function operations(): HasMany
     {
         return $this->hasMany(Operation::class);
+    }
+
+    public function inventorySnapshots(): HasMany
+    {
+        return $this->hasMany(InventorySnapshot::class);
+    }
+
+    public function sitePlugins(): HasMany
+    {
+        return $this->hasMany(SitePlugin::class);
+    }
+
+    public function siteThemes(): HasMany
+    {
+        return $this->hasMany(SiteTheme::class);
+    }
+
+    public function siteCoreStates(): HasMany
+    {
+        return $this->hasMany(SiteCoreState::class);
+    }
+
+    public function latestInventorySnapshot(): ?InventorySnapshot
+    {
+        return $this->inventorySnapshots()
+            ->where('status', InventorySnapshot::STATUS_COMPLETED)
+            ->orderByDesc('completed_at')
+            ->orderByDesc('id')
+            ->first();
     }
 
     public function latestMetric(string $metricType): ?SiteMetric
