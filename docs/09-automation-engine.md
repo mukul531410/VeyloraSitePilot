@@ -312,6 +312,23 @@ Recovery writes `automation_run_recovery_requested`,
 `automation_run_recovery_conflict`. It does not duplicate normal Operation
 lifecycle audit events.
 
+## Rule management API
+
+Rule persistence is reachable through `GET/POST /api/v1/automation/rules` and
+`GET/PATCH/DELETE /api/v1/automation/rules/{rule}`. Reads require active
+membership in the active organization owning the active site; mutations require
+an active organization owner or admin, the same MVP role fallback as approval
+and recovery.
+
+Creating a rule is configuration only and never submits an Operation, so the
+policy, approval and operation boundaries stay at evaluation time.
+`trigger_type`, `action_type` and `conditions_json` are server-controlled,
+`enabled` defaults to `false`, and only `name`, `enabled` and `schedule_json` are
+mutable. `schedule_json` must contain exactly `every_minutes` and `starts_at_utc`
+as defined by `ScheduledOccurrenceResolver`, so a rule the scheduler would reject
+can never be persisted. A rule that already has runs cannot be deleted, because
+run, intent and provenance history is preserved; it is retired by disabling it.
+
 ## Concurrency
 
 Site-level operations require locking where concurrent actions could conflict.

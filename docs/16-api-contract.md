@@ -67,7 +67,6 @@ GET /sites/{site}/inventory
 GET /sites/{site}/metrics
 GET /sites/{site}/incidents
 GET /sites/{site}/tasks
-POST /sites/{site}/tasks
 
 ### Operations
 GET /operations
@@ -81,8 +80,8 @@ POST /operations/{operation}/resolve-unknown
 
 ### Automation
 
-Rule and run persistence is defined for Phase 3 Foundation. The endpoints
-below remain planned and are not implemented by the schema/models checkpoint.
+Rule and run persistence is defined for Phase 3 Foundation. The run recovery
+endpoints below are implemented. `GET /automation/runs` remains planned.
 
 GET /automation/rules
 POST /automation/rules
@@ -93,6 +92,59 @@ DELETE /automation/rules/{rule}
 GET /automation/runs
 GET /automation/runs/{run}
 POST /automation/runs/{run}/recover
+
+#### Rule management
+
+`GET/POST /automation/rules`, `GET/PATCH/DELETE /automation/rules/{rule}` are
+implemented. Reads require an active membership in the active organization that
+owns the active site; a rule that is not visible this way is HTTP 404, so the
+endpoints cannot be used to probe another tenant. Mutating a rule additionally
+requires an active organization **owner or admin**, the same executable MVP role
+fallback used by approvals and recovery. `GET /automation/rules` supports an
+optional `site_id` filter and `per_page` (default 25, maximum 100).
+
+`POST /automation/rules` body:
+
+```
+{
+  "organization_id": "...",
+  "site_id": "...",
+  "name": "Nightly cache clear",
+  "enabled": false,
+  "schedule_json": { "every_minutes": 30, "starts_at_utc": "2026-10-01T00:00:00Z" },
+  "target_json": { "cache_type": "wordpress" }
+}
+```
+
+`trigger_type`, `action_type` and `conditions_json` are **server-controlled and
+not accepted from the client**. The MVP stores `schedule` / `action.cache_clear`
+/ `null` regardless of what is submitted, so a client can never widen what the
+engine supports. `enabled` defaults to `false`: a new rule does not start firing
+until it is explicitly enabled. `target_json.cache_type` defaults to `wordpress`
+when `target_json` is omitted and rejects any other value.
+
+`PATCH /automation/rules/{rule}` accepts only `name`, `enabled` and
+`schedule_json`. Organization, site, trigger, action and conditions are
+immutable, so a rule can never be repointed at another site or action while its
+runs still reference it. An empty body is HTTP 422.
+
+`schedule_json` must contain exactly `every_minutes` (positive integer) and
+`starts_at_utc` (`YYYY-MM-DDTHH:MM:SSZ`) and nothing else; the same
+`ScheduledOccurrenceResolver` contract the scheduler uses is the authority, so
+the API never persists a rule the scheduler would later skip.
+
+`DELETE /automation/rules/{rule}` **refuses with HTTP 409 `rule_has_runs` when
+the rule has any run**, because run, intent and provenance history must not be
+destroyed. Retire such a rule with `PATCH {"enabled": false}` instead. A rule
+with no runs is deleted and audited. Rule responses include `runs_count` and
+`deletable` so a client can tell which case applies without attempting a delete.
+
+Rule management is configuration only: it submits no Operation, so PolicyEngine
+and OperationService remain the authorization boundary at evaluation time.
+Creating, updating and deleting a rule are audited as `automation_rule_created`,
+`automation_rule_updated` and `automation_rule_deleted` against
+`target_type: automation_rule`, with `before_json`/`after_json` snapshots and
+`remote_execution_claimed: false`.
 
 `GET /automation/runs/{run}` reports one run, its immutable intent snapshot, the
 latest recovery record, the linked Operation, any Operation candidate found by

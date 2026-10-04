@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\ApprovalsController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AutomationRulesController;
 use App\Http\Controllers\Api\AutomationRunsController;
 use App\Http\Controllers\Api\ConnectorController;
 use App\Http\Controllers\Api\OperationsController;
@@ -55,6 +56,12 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/operations/{operation}/resolve-unknown', [OperationsController::class, 'resolveUnknown']);
         Route::post('/approvals/{approval}/approve', [ApprovalsController::class, 'approve']);
         Route::post('/approvals/{approval}/reject', [ApprovalsController::class, 'reject']);
+
+        Route::get('/automation/rules', [AutomationRulesController::class, 'index']);
+        Route::post('/automation/rules', [AutomationRulesController::class, 'store']);
+        Route::get('/automation/rules/{rule}', [AutomationRulesController::class, 'show']);
+        Route::patch('/automation/rules/{rule}', [AutomationRulesController::class, 'update']);
+        Route::delete('/automation/rules/{rule}', [AutomationRulesController::class, 'destroy']);
 
         Route::get('/automation/runs/{run}', [AutomationRunsController::class, 'show']);
         Route::post('/automation/runs/{run}/recover', [AutomationRunsController::class, 'recover']);

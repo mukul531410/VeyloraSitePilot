@@ -34,6 +34,18 @@ abstract class BaseController extends Controller
         return request()->header('X-Request-ID', Str::uuid()->toString());
     }
 
+    protected function paginationMeta($paginator): array
+    {
+        return [
+            'current_page' => $paginator->currentPage(),
+            'per_page' => $paginator->perPage(),
+            'total' => $paginator->total(),
+            'last_page' => $paginator->lastPage(),
+            'from' => $paginator->firstItem(),
+            'to' => $paginator->lastItem(),
+        ];
+    }
+
     protected function transformUser($user): array
     {
         $organizations = $user->relationLoaded('organizations')

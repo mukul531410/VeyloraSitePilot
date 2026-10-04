@@ -103,6 +103,29 @@ abandonment never claims that a WordPress operation failed. An operator recovers
 at most one run at a time, duplicate request keys replay safely, and a different
 concurrent request conflicts.
 
+## Phase 3 Automation Foundation — Rule management API
+
+Rule persistence is exposed through `GET/POST /api/v1/automation/rules` and
+`GET/PATCH/DELETE /api/v1/automation/rules/{rule}`. Reads require active
+membership in the active organization owning the active site, and a rule outside
+that scope is reported as not found. Mutating a rule requires an active
+organization owner or admin, matching the approval and recovery role fallback.
+
+Rule management is configuration only. It never submits an Operation and never
+dispatches connector work, so PolicyEngine and OperationService remain the
+authorization boundary at evaluation time. `trigger_type`, `action_type` and
+`conditions_json` are server-controlled so a client cannot widen what the engine
+supports; `enabled` defaults to `false`; and only `name`, `enabled` and
+`schedule_json` are mutable, so a rule cannot be repointed at another site or
+action while its runs still reference it. `schedule_json` is validated by the same
+occurrence resolver the scheduler uses, so an unusable schedule is rejected at the
+API boundary instead of being silently skipped later.
+
+Deleting a rule that already has runs is refused, because run, intent and
+provenance history must survive; such a rule is retired by disabling it. Rule
+mutations are audited with before/after snapshots and never claim remote
+execution.
+
 ## Status
 Architecture baseline approved for implementation.
 
