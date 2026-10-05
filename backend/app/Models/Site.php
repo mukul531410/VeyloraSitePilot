@@ -74,6 +74,11 @@ class Site extends Model
         return $this->hasMany(InventorySnapshot::class);
     }
 
+    public function availableUpdates(): HasMany
+    {
+        return $this->hasMany(AvailableUpdate::class);
+    }
+
     public function sitePlugins(): HasMany
     {
         return $this->hasMany(SitePlugin::class);

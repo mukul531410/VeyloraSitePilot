@@ -53,16 +53,28 @@ snapshots). They are independent of `snapshot_type` and whether a category array
 was present in the request.
 
 ### site_plugins
-id, site_id, inventory_snapshot_id, plugin_key, name, version, update_available, active, status, metadata_json
+id, site_id, inventory_snapshot_id, plugin_key, name, version, update_available, update_available_reported nullable, active, status, metadata_json
 
 ### site_themes
-id, site_id, inventory_snapshot_id, theme_key, name, version, update_available, active, status, metadata_json
+id, site_id, inventory_snapshot_id, theme_key, name, version, update_available, update_available_reported nullable, active, status, metadata_json
 
 ### site_core_states
-id, site_id, inventory_snapshot_id, wordpress_version, php_version, update_available, status
+id, site_id, inventory_snapshot_id, wordpress_version, php_version, update_available, update_available_reported nullable, status
+
+`update_available_reported` preserves whether the connector explicitly supplied
+the optional `update_available` value. `null` represents older rows for which
+presence was not recorded. Derived findings treat only a reported value as an
+item-level update observation; a missing value is not interpreted as false.
 
 ### available_updates
-id, site_id, component_type, component_key, current_version, target_version, severity, security_related, detected_at, resolved_at, status
+id, site_id, type, item_identifier, severity, status, first_seen_at, last_seen_at, resolved_at, created_at, updated_at
+
+Identity is unique on `(site_id, type, item_identifier)`. `type` is `core`,
+`plugin`, or `theme`; current findings use severity `info` and status `open` or
+`resolved`. The table has a foreign key from `site_id` to `sites.id` with
+cascade-on-delete and an index on `(site_id, status, last_seen_at)`. Findings are
+derived from persisted inventory snapshot/component rows; the snapshot remains
+the immutable source observation.
 
 ## Monitoring
 ### health_checks

@@ -153,8 +153,29 @@ Inventory is Level 0 observation. It creates no Operation, needs no approval, an
 never claims remote execution. `GET /api/v1/sites/{site}/inventory` returns the
 newest completed snapshot with core state, plugins, themes and update counts; a
 site that has never synced is reported as an empty inventory rather than an error.
-Update *detection* and severity (`available_updates`) and the dashboard frontend
-remain future work.
+Available updates are derived from persisted snapshot component rows in the same
+transaction that stores each accepted snapshot. Findings use identity
+`(site_id, type, item_identifier)`: core is `(core, wordpress)`, plugins use
+`(plugin, plugin key)`, and themes use `(theme, theme key)`. Severity is always
+`info`; status is `open` or `resolved`.
+
+An observed item with `update_available=true` creates or refreshes an open
+finding. Refresh preserves `first_seen_at` and advances `last_seen_at`. An
+explicitly supplied `update_available=false` resolves that identity; omission of
+the optional field remains unknown and does not resolve it. A resolved finding
+reopens if a later snapshot reports the update again; it preserves its original
+`first_seen_at` and clears `resolved_at`. Absence resolves plugin/theme findings
+only when that snapshot explicitly declares the category complete. Incomplete or
+unknown completeness never resolves findings by absence. Replayed inventory
+payloads return the existing snapshot and do not process findings again.
+
+`GET /api/v1/sites/{site}/available-updates` requires authenticated access plus
+active membership in the active organization that owns the active site. It
+defaults to open findings, supports status/type/severity filters, defaults to 25
+records per page with a maximum of 100, and orders by `last_seen_at DESC`, then
+`id ASC`. Findings are observations only; update execution, security severity,
+vulnerability data, and notifications are outside this contract. The dashboard
+frontend remains future work.
 
 ## Phase 5 — Operations management API
 

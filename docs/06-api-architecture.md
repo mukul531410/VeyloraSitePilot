@@ -36,6 +36,7 @@ Future incompatible contracts use a new major version.
 /api/v1/sites/{site}
 /api/v1/sites/{site}/health
 /api/v1/sites/{site}/inventory
+/api/v1/sites/{site}/available-updates
 /api/v1/sites/{site}/metrics
 /api/v1/sites/{site}/incidents
 /api/v1/sites/{site}/tasks

@@ -17,11 +17,13 @@ class SiteCoreState extends Model
         'wordpress_version',
         'php_version',
         'update_available',
+        'update_available_reported',
         'status',
     ];
 
     protected $casts = [
         'update_available' => 'boolean',
+        'update_available_reported' => 'boolean',
     ];
 
     public function site(): BelongsTo

@@ -23,6 +23,8 @@ class InventorySubmissionService
 
     public const CAPABILITY_THEMES = 'read.themes';
 
+    public function __construct(private AvailableUpdateFindingService $availableUpdateFindings) {}
+
     /**
      * @param  array<string, mixed>  $inventory
      * @return array{snapshot?: InventorySnapshot, created?: bool}|array{error: array{0: string, 1: string, 2: int}}
@@ -66,7 +68,10 @@ class InventorySubmissionService
                 return ['snapshot' => $existing, 'created' => false];
             }
 
-            return ['snapshot' => $this->persist($site, $inventory, $checksum), 'created' => true];
+            $snapshot = $this->persist($site, $inventory, $checksum);
+            $this->availableUpdateFindings->process($snapshot);
+
+            return ['snapshot' => $snapshot, 'created' => true];
         });
     }
 
@@ -168,6 +173,7 @@ class InventorySubmissionService
             'wordpress_version' => $wordpress['version'] ?? null,
             'php_version' => $wordpress['php_version'] ?? null,
             'update_available' => (bool) ($wordpress['update_available'] ?? false),
+            'update_available_reported' => array_key_exists('update_available', $wordpress),
             'status' => (string) ($wordpress['status'] ?? 'active'),
         ]);
 
@@ -179,6 +185,7 @@ class InventorySubmissionService
                 'name' => (string) $plugin['name'],
                 'version' => $plugin['version'] ?? null,
                 'update_available' => (bool) ($plugin['update_available'] ?? false),
+                'update_available_reported' => array_key_exists('update_available', $plugin),
                 'active' => (bool) ($plugin['active'] ?? false),
                 'status' => (string) ($plugin['status'] ?? 'active'),
                 'metadata_json' => $plugin['metadata'] ?? null,
@@ -193,6 +200,7 @@ class InventorySubmissionService
                 'name' => (string) $theme['name'],
                 'version' => $theme['version'] ?? null,
                 'update_available' => (bool) ($theme['update_available'] ?? false),
+                'update_available_reported' => array_key_exists('update_available', $theme),
                 'active' => (bool) ($theme['active'] ?? false),
                 'status' => (string) ($theme['status'] ?? 'active'),
                 'metadata_json' => $theme['metadata'] ?? null,

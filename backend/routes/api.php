@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\ApprovalsController;
+use App\Http\Controllers\Api\AvailableUpdatesController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutomationRulesController;
 use App\Http\Controllers\Api\AutomationRunsController;
@@ -48,6 +49,7 @@ Route::prefix('v1')->group(function (): void {
 
         Route::get('/sites/{site}/health', [SiteMonitoringController::class, 'health']);
         Route::get('/sites/{site}/inventory', [SiteMonitoringController::class, 'inventory']);
+        Route::get('/sites/{site}/available-updates', [AvailableUpdatesController::class, 'index']);
         Route::get('/sites/{site}/metrics', [SiteMonitoringController::class, 'metrics']);
         Route::get('/sites/{site}/incidents', [SiteMonitoringController::class, 'incidents']);
 

@@ -81,7 +81,10 @@ never treated as complete. Completeness is stored on the immutable inventory
 snapshot; it is not inferred from `snapshot_type` or array presence. Future
 derived findings may be resolved by category absence only when the corresponding
 snapshot completeness value is `true`. An explicitly reported item remains a
-usable observation regardless of category completeness.
+usable observation regardless of category completeness. The optional item field
+`update_available` is persisted with a nullable `update_available_reported` flag
+on core/plugin/theme rows, so an omitted field remains unknown and cannot be
+mistaken for an explicit `false` by derived findings.
 
 ## Command lifecycle
 

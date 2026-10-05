@@ -64,6 +64,7 @@ DELETE /sites/{site}/connections/{connection}
 ### Site Monitoring
 GET /sites/{site}/health
 GET /sites/{site}/inventory
+GET /sites/{site}/available-updates
 GET /sites/{site}/metrics
 GET /sites/{site}/incidents
 GET /sites/{site}/tasks
@@ -75,6 +76,15 @@ timestamps), `core` (WordPress/PHP version and core update availability),
 that has never synced is HTTP 200 with `snapshot`/`core` `null` and empty arrays,
 so the dashboard can tell "not synced yet" from a failed request. It requires
 membership in the site's organization.
+
+`GET /sites/{site}/available-updates` returns derived update findings for an
+active site in an active organization where the authenticated user has active
+membership. It defaults to `status=open`, supports `status=open|resolved`,
+`type=core|plugin|theme`, and `severity=info`, and returns page-number pagination
+with default `per_page=25` capped at 100. Results are ordered by
+`last_seen_at DESC`, then `id ASC`. Each item includes `id`, `site_id`, `type`,
+`item_identifier`, `severity`, `status`, `first_seen_at`, `last_seen_at`, and
+`resolved_at`.
 POST /sites/{site}/tasks
 
 ### Operations
@@ -272,7 +282,9 @@ nullable booleans (`wordpress_complete`, `plugins_complete`, `themes_complete`);
 they are not inferred from `snapshot_type` or array presence. Future derived
 findings may use absence to resolve only when that category's stored value is
 true. Explicit item observations remain usable when a category is incomplete or
-unknown.
+unknown. Because `update_available` is optional on inventory items, persistence
+also records whether that field was supplied; an omitted value is unknown and
+does not resolve an item finding.
 
 The connector never chooses the site: the snapshot is always attributed to the
 authenticated connection's site. Submission is serialized per site with a row

@@ -18,6 +18,7 @@ class SiteTheme extends Model
         'name',
         'version',
         'update_available',
+        'update_available_reported',
         'active',
         'status',
         'metadata_json',
@@ -25,6 +26,7 @@ class SiteTheme extends Model
 
     protected $casts = [
         'update_available' => 'boolean',
+        'update_available_reported' => 'boolean',
         'active' => 'boolean',
         'metadata_json' => 'array',
     ];
