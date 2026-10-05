@@ -28,11 +28,17 @@ class InventorySnapshot extends Model
         'completed_at',
         'status',
         'checksum',
+        'wordpress_complete',
+        'plugins_complete',
+        'themes_complete',
     ];
 
     protected $casts = [
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
+        'wordpress_complete' => 'boolean',
+        'plugins_complete' => 'boolean',
+        'themes_complete' => 'boolean',
     ];
 
     public function site(): BelongsTo

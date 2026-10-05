@@ -73,11 +73,12 @@ class InventorySubmissionService
     /** @return array{error: array{0: string, 1: string, 2: int}}|null */
     private function capabilityDenied(SiteConnection $connection, array $inventory): ?array
     {
+        $completeness = $inventory['category_completeness'] ?? [];
         $required = [self::CAPABILITY_CORE];
-        if (! empty($inventory['plugins'])) {
+        if (! empty($inventory['plugins']) || $this->isExplicitlyComplete($completeness['plugins'] ?? null)) {
             $required[] = self::CAPABILITY_PLUGINS;
         }
-        if (! empty($inventory['themes'])) {
+        if (! empty($inventory['themes']) || $this->isExplicitlyComplete($completeness['themes'] ?? null)) {
             $required[] = self::CAPABILITY_THEMES;
         }
 
@@ -110,6 +111,13 @@ class InventorySubmissionService
             return ['error' => ['completed_at must not precede started_at', 'invalid_inventory', 422]];
         }
 
+        $completeness = $inventory['category_completeness'] ?? [];
+        foreach (['plugins', 'themes'] as $category) {
+            if ($this->isExplicitlyComplete($completeness[$category] ?? null) && ! array_key_exists($category, $inventory)) {
+                return ['error' => ["{$category} must be present when declared complete", 'invalid_inventory', 422]];
+            }
+        }
+
         foreach (['plugins' => 'key', 'themes' => 'key'] as $section => $keyField) {
             $seen = [];
 
@@ -127,6 +135,11 @@ class InventorySubmissionService
         return null;
     }
 
+    private function isExplicitlyComplete(mixed $value): bool
+    {
+        return $value === true || $value === 1 || $value === '1';
+    }
+
     /** @param array<string, mixed> $inventory */
     private function persist(Site $site, array $inventory, string $checksum): InventorySnapshot
     {
@@ -142,6 +155,9 @@ class InventorySubmissionService
             'completed_at' => date('Y-m-d H:i:s', $completedAt),
             'status' => InventorySnapshot::STATUS_COMPLETED,
             'checksum' => $checksum,
+            'wordpress_complete' => $inventory['category_completeness']['wordpress'] ?? null,
+            'plugins_complete' => $inventory['category_completeness']['plugins'] ?? null,
+            'themes_complete' => $inventory['category_completeness']['themes'] ?? null,
         ]);
 
         $wordpress = $inventory['wordpress'];

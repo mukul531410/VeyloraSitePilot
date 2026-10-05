@@ -61,6 +61,114 @@ class InventorySyncTest extends TestCase
         $this->assertTrue($themes->first()->active);
     }
 
+    public function test_explicit_category_completeness_is_persisted(): void
+    {
+        [, , $token] = $this->makeTenant();
+        $payload = $this->payload();
+        $payload['category_completeness'] = [
+            'wordpress' => true,
+            'plugins' => true,
+            'themes' => true,
+        ];
+
+        $response = $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertCreated();
+
+        $snapshot = InventorySnapshot::query()->findOrFail($response->json('data.inventory_snapshot_id'));
+        $this->assertTrue($snapshot->wordpress_complete);
+        $this->assertTrue($snapshot->plugins_complete);
+        $this->assertTrue($snapshot->themes_complete);
+    }
+
+    public function test_incomplete_and_omitted_categories_are_not_marked_complete(): void
+    {
+        [, , $token] = $this->makeTenant();
+        $payload = $this->payload();
+        $payload['category_completeness'] = ['wordpress' => false, 'plugins' => false];
+        unset($payload['themes']);
+
+        $response = $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertCreated();
+
+        $snapshot = InventorySnapshot::query()->findOrFail($response->json('data.inventory_snapshot_id'));
+        $this->assertFalse($snapshot->wordpress_complete);
+        $this->assertFalse($snapshot->plugins_complete);
+        $this->assertNull($snapshot->themes_complete);
+    }
+
+    public function test_complete_empty_category_requires_capability_and_is_persisted(): void
+    {
+        [, , $token] = $this->makeTenant(['read.wordpress']);
+        $payload = [
+            'started_at' => '2026-10-01T10:00:00Z',
+            'wordpress' => ['version' => '6.5.2'],
+            'plugins' => [],
+            'category_completeness' => ['plugins' => true],
+        ];
+
+        $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertForbidden()
+            ->assertJsonPath('error.code', 'capability_denied');
+
+        $this->assertSame(0, InventorySnapshot::query()->count());
+
+        ConnectorCapability::query()->create([
+            'site_connection_id' => SiteConnection::query()->firstOrFail()->id,
+            'capability_key' => 'read.plugins',
+            'enabled' => true,
+            'discovered_at' => now(),
+        ]);
+        $response = $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertCreated();
+
+        $snapshot = InventorySnapshot::query()->findOrFail($response->json('data.inventory_snapshot_id'));
+        $this->assertTrue($snapshot->plugins_complete);
+    }
+
+    public function test_legacy_inventory_payload_keeps_completeness_unknown_and_replay_unchanged(): void
+    {
+        [, , $token] = $this->makeTenant();
+        $payload = $this->payload();
+
+        $first = $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertCreated()
+            ->json('data.inventory_snapshot_id');
+
+        $snapshot = InventorySnapshot::query()->findOrFail($first);
+        $this->assertNull($snapshot->wordpress_complete);
+        $this->assertNull($snapshot->plugins_complete);
+        $this->assertNull($snapshot->themes_complete);
+
+        $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', $payload)
+            ->assertOk()
+            ->assertJsonPath('data.created', false)
+            ->assertJsonPath('data.inventory_snapshot_id', $first);
+
+        $this->assertSame(1, InventorySnapshot::query()->count());
+    }
+
+    public function test_complete_category_must_be_present_in_payload(): void
+    {
+        [, , $token] = $this->makeTenant();
+
+        $this->asConnector($token)
+            ->postJson('/api/v1/connector/inventory', [
+                'started_at' => '2026-10-01T10:00:00Z',
+                'wordpress' => ['version' => '6.5.2'],
+                'category_completeness' => ['plugins' => true],
+            ])
+            ->assertStatus(422)
+            ->assertJsonPath('error.code', 'invalid_inventory');
+
+        $this->assertSame(0, InventorySnapshot::query()->count());
+    }
+
     public function test_identical_resubmission_replays_the_same_snapshot(): void
     {
         [, , $token] = $this->makeTenant();

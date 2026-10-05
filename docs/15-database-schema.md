@@ -44,7 +44,13 @@ id, site_connection_id, connector_version, wordpress_version, php_version, repor
 
 ## Inventory
 ### inventory_snapshots
-id, site_id, snapshot_type, started_at, completed_at, status, checksum, created_at
+id, site_id, snapshot_type, started_at, completed_at, status, checksum, wordpress_complete nullable, plugins_complete nullable, themes_complete nullable, created_at
+
+The nullable category completeness fields record explicit connector declarations.
+`true` means the category was completely observed, `false` means it was observed
+but is incomplete, and `null` means completeness is unknown (including legacy
+snapshots). They are independent of `snapshot_type` and whether a category array
+was present in the request.
 
 ### site_plugins
 id, site_id, inventory_snapshot_id, plugin_key, name, version, update_available, active, status, metadata_json

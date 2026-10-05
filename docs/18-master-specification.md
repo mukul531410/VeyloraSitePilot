@@ -138,6 +138,17 @@ serialized per site under a row lock, and the canonical-payload SHA-256 checksum
 stored on the snapshot makes an identical connector retry replay the existing
 snapshot instead of duplicating history.
 
+The optional `category_completeness` request object contains boolean
+`wordpress`, `plugins`, and `themes` declarations. `true` means completely
+observed, `false` means observed but incomplete, and omitted means unknown.
+Legacy requests remain accepted with unknown completeness. A complete plugins
+or themes declaration requires its array (which may be empty) and the matching
+read capability. Completeness is persisted as nullable booleans on the immutable
+snapshot; it is never inferred from `snapshot_type` or array presence. Future
+derived findings may resolve by absence only for a category explicitly marked
+complete; explicit item observations remain usable for incomplete/unknown
+categories.
+
 Inventory is Level 0 observation. It creates no Operation, needs no approval, and
 never claims remote execution. `GET /api/v1/sites/{site}/inventory` returns the
 newest completed snapshot with core state, plugins, themes and update counts; a

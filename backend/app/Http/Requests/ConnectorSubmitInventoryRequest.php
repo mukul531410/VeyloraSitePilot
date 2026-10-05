@@ -17,6 +17,11 @@ class ConnectorSubmitInventoryRequest extends FormRequest
             'started_at' => ['required', 'date'],
             'completed_at' => ['sometimes', 'nullable', 'date'],
 
+            'category_completeness' => ['sometimes', 'array:wordpress,plugins,themes'],
+            'category_completeness.wordpress' => ['sometimes', 'boolean'],
+            'category_completeness.plugins' => ['sometimes', 'boolean'],
+            'category_completeness.themes' => ['sometimes', 'boolean'],
+
             'wordpress' => ['required', 'array'],
             'wordpress.version' => ['sometimes', 'nullable', 'string', 'max:64'],
             'wordpress.php_version' => ['sometimes', 'nullable', 'string', 'max:64'],

@@ -63,6 +63,26 @@ The connector periodically reports:
 
 No secrets should be sent as telemetry.
 
+## Inventory category completeness
+
+`POST /api/v1/connector/inventory` may include the optional
+`category_completeness` object with boolean keys `wordpress`, `plugins`, and
+`themes`. `true` declares that category fully observed; `false` declares that it
+was observed but incomplete. An omitted key means unknown. A `true` plugins or
+themes declaration requires the corresponding array in the payload; an empty
+array with `true` explicitly means the category was completely observed and
+contained no items. Declaring plugins or themes complete requires the matching
+`read.plugins` or `read.themes` capability, even for an empty array.
+
+The object and all its keys are optional for backward compatibility. A legacy
+request without `category_completeness` is accepted and stores all category
+completeness values as unknown. Omitted category arrays remain unknown and are
+never treated as complete. Completeness is stored on the immutable inventory
+snapshot; it is not inferred from `snapshot_type` or array presence. Future
+derived findings may be resolved by category absence only when the corresponding
+snapshot completeness value is `true`. An explicitly reported item remains a
+usable observation regardless of category completeness.
+
 ## Command lifecycle
 
 For remote operations:

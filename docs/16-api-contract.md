@@ -244,18 +244,35 @@ GET /connector/jobs
 `POST /connector/inventory` is implemented and closes connection lifecycle step
 "initial inventory sync". It requires an authenticated active connector and the
 documented read capability for each section it reports: `read.wordpress` always,
-`read.plugins` when `plugins` is non-empty, and `read.themes` when `themes` is
-non-empty. A missing or disabled capability is HTTP 403 `capability_denied`.
+`read.plugins` when `plugins` is non-empty or explicitly complete, and
+`read.themes` when `themes` is non-empty or explicitly complete. A missing or
+disabled capability is HTTP 403 `capability_denied`.
 
 ```
 {
   "started_at": "2026-10-01T10:00:00Z",
   "completed_at": "2026-10-01T10:00:04Z",
+  "category_completeness": { "wordpress": true, "plugins": true, "themes": false },
   "wordpress": { "version": "6.5.2", "php_version": "8.2", "update_available": true, "status": "active" },
   "plugins": [ { "key": "akismet/akismet", "name": "Akismet", "version": "5.8", "active": true, "update_available": false, "metadata": {} } ],
   "themes":  [ { "key": "twentytwentyfour", "name": "Twenty Twenty-Four", "version": "1.1", "active": true } ]
 }
 ```
+
+`category_completeness` is optional and accepts only the boolean keys
+`wordpress`, `plugins`, and `themes`. `true` declares a complete observation;
+`false` declares an incomplete observation; an omitted key means unknown. A
+complete plugins or themes declaration requires that category's array in the
+request (an empty array is valid and means complete with no items). Completeness
+declarations for plugins/themes require the corresponding read capability even
+when the array is empty. Legacy requests without this object remain valid and
+persist all completeness values as unknown. An omitted category array is unknown,
+never implicitly complete. The values are persisted on `inventory_snapshots` as
+nullable booleans (`wordpress_complete`, `plugins_complete`, `themes_complete`);
+they are not inferred from `snapshot_type` or array presence. Future derived
+findings may use absence to resolve only when that category's stored value is
+true. Explicit item observations remain usable when a category is incomplete or
+unknown.
 
 The connector never chooses the site: the snapshot is always attributed to the
 authenticated connection's site. Submission is serialized per site with a row
