@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Contracts\ConnectorCredentialResolver;
 use App\Events\NotificationSourceEvent;
 use App\Listeners\DeliverNotification;
 use App\Models\ApprovalRequest;
@@ -16,6 +17,7 @@ use App\Observers\AvailableUpdateObserver;
 use App\Observers\IncidentObserver;
 use App\Observers\OperationObserver;
 use App\Observers\OperationResultObserver;
+use App\Services\UnconfiguredConnectorCredentialResolver;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
 
@@ -23,7 +25,7 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        //
+        $this->app->bind(ConnectorCredentialResolver::class, UnconfiguredConnectorCredentialResolver::class);
     }
 
     public function boot(): void
