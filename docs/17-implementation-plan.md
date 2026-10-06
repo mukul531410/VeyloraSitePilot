@@ -75,7 +75,8 @@ Only now create the local WordPress test environment.
 - backend monitoring foundation: health checks, uptime, incidents, metrics, scheduler
 - server-side HTTPS certificate inspection
 - connector inventory sync and `GET /sites/{site}/inventory`
-- notifications and security findings remain pending
+- in-app notifications for durable incident, update, operation, approval and automation transitions
+- security findings remain pending
 
 ## Phase 5 — Maintenance Operations
 - update checks

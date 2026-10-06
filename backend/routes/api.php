@@ -1,11 +1,12 @@
 <?php
 
 use App\Http\Controllers\Api\ApprovalsController;
-use App\Http\Controllers\Api\AvailableUpdatesController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutomationRulesController;
 use App\Http\Controllers\Api\AutomationRunsController;
+use App\Http\Controllers\Api\AvailableUpdatesController;
 use App\Http\Controllers\Api\ConnectorController;
+use App\Http\Controllers\Api\NotificationsController;
 use App\Http\Controllers\Api\OperationsController;
 use App\Http\Controllers\Api\OrganizationController;
 use App\Http\Controllers\Api\SiteConnectionController;
@@ -62,6 +63,10 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/operations/{operation}/resolve-unknown', [OperationsController::class, 'resolveUnknown']);
         Route::post('/approvals/{approval}/approve', [ApprovalsController::class, 'approve']);
         Route::post('/approvals/{approval}/reject', [ApprovalsController::class, 'reject']);
+
+        Route::get('/notifications', [NotificationsController::class, 'index']);
+        Route::get('/notifications/{notification}', [NotificationsController::class, 'show']);
+        Route::post('/notifications/{notification}/read', [NotificationsController::class, 'markRead']);
 
         Route::get('/automation/rules', [AutomationRulesController::class, 'index']);
         Route::post('/automation/rules', [AutomationRulesController::class, 'store']);

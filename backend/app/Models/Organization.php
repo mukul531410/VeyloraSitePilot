@@ -45,4 +45,14 @@ class Organization extends Model
     {
         return $this->hasMany(Role::class);
     }
+
+    public function notifications(): HasMany
+    {
+        return $this->hasMany(Notification::class);
+    }
+
+    public function notificationChannels(): HasMany
+    {
+        return $this->hasMany(NotificationChannel::class);
+    }
 }

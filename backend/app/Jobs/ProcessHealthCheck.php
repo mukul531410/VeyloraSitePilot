@@ -16,14 +16,16 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
-class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
+class ProcessHealthCheck implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable, Queueable;
 
     public int $timeout = 60;
+
     public int $tries = 3;
 
     private string $correlationId;
+
     private Carbon $now;
 
     private static array $incidentTypeMap = [
@@ -44,7 +46,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
 
     public function uniqueId(): string
     {
-        return 'health-check:' . $this->siteId;
+        return 'health-check:'.$this->siteId;
     }
 
     public function handle(): void
@@ -369,15 +371,19 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             return;
         }
 
-        Incident::where('site_id', $site->id)
+        $recoveredIncidents = Incident::where('site_id', $site->id)
             ->whereIn('type', $resolvedTypes)
             ->whereIn('status', Incident::OPEN_STATUSES)
-            ->update([
+            ->get();
+
+        foreach ($recoveredIncidents as $incident) {
+            $incident->update([
                 'status' => Incident::STATUS_RESOLVED,
                 'resolved_at' => $this->now,
                 'last_detected_at' => $this->now,
                 'incident_key' => null,
             ]);
+        }
     }
 
     private function createOrUpdateIncidents(Site $site, array $checks): void
@@ -400,7 +406,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
             if ($existing) {
                 $existing->update([
                     'last_detected_at' => $this->now,
-                    'incident_key' => $existing->incident_key ?: $site->id . ':' . $incidentType,
+                    'incident_key' => $existing->incident_key ?: $site->id.':'.$incidentType,
                 ]);
 
                 continue;
@@ -421,7 +427,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
                     'severity' => $severity,
                     'title' => $this->generateIncidentTitle($checkType),
                     'description' => $this->generateIncidentDescription($check),
-                    'incident_key' => $site->id . ':' . $incidentType,
+                    'incident_key' => $site->id.':'.$incidentType,
                 ]);
 
                 continue;
@@ -436,7 +442,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
                 'description' => $this->generateIncidentDescription($check),
                 'first_detected_at' => $this->now,
                 'last_detected_at' => $this->now,
-                'incident_key' => $site->id . ':' . $incidentType,
+                'incident_key' => $site->id.':'.$incidentType,
             ]);
         }
     }
@@ -489,6 +495,7 @@ class ProcessHealthCheck implements ShouldQueue, ShouldBeUnique
 
         if ($metric) {
             $metric->update(['value' => $value, 'unit' => $unit, 'observed_at' => $this->now]);
+
             return;
         }
 

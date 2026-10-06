@@ -79,6 +79,11 @@ class Site extends Model
         return $this->hasMany(AvailableUpdate::class);
     }
 
+    public function notifications(): HasMany
+    {
+        return $this->hasMany(Notification::class);
+    }
+
     public function sitePlugins(): HasMany
     {
         return $this->hasMany(SitePlugin::class);

@@ -3,7 +3,9 @@
 namespace App\Observers;
 
 use App\Jobs\DispatchOperationJob;
+use App\Models\Notification;
 use App\Models\Operation;
+use App\Services\NotificationEventPublisher;
 use LogicException;
 
 class OperationObserver
@@ -55,6 +57,15 @@ class OperationObserver
         if ($operation->wasChanged('status')) {
             $originalStatus = $operation->getOriginal('status');
             $newStatus = $operation->status;
+
+            $notificationType = match ($newStatus) {
+                Operation::STATUS_FAILED, Operation::STATUS_DEAD_LETTER => Notification::TYPE_OPERATION_FAILED,
+                Operation::STATUS_UNKNOWN => Notification::TYPE_OPERATION_UNKNOWN,
+                default => null,
+            };
+            if ($notificationType !== null) {
+                app(NotificationEventPublisher::class)->publish('operation', $operation->id, $notificationType);
+            }
 
             if ($newStatus === Operation::STATUS_QUEUED) {
                 if ($originalStatus === Operation::STATUS_PENDING_APPROVAL) {

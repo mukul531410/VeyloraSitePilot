@@ -232,8 +232,28 @@ executable permission schema. Approval endpoints do not cause automation to
 approve requests.
 
 ### Notifications
-GET /notifications
-POST /notifications/{notification}/read
+`GET /notifications` returns only the authenticated user's notifications in
+active organizations where the user has active membership. Site-linked records
+must also belong to an active site in that organization. Filters are
+`status=unread|read`, `type` (one of the eight documented notification types),
+`severity=info|low|medium|high|critical`, and `site_id`. Status defaults to
+`unread`. Page-number pagination defaults to 25 and caps at 100. Results are
+ordered by `created_at DESC`, then `id DESC`.
+
+`GET /notifications/{notification}` returns one notification only when the
+authenticated user is its recipient and it remains in the same active
+organization/site scope; otherwise it returns 404. Reading detail does not
+mark it read.
+
+`POST /notifications/{notification}/read` is recipient-only, sets `read_at`
+once, and is idempotent. No delete, archive, bulk-delete, or external delivery
+endpoints are provided. All endpoints use the standard response envelope.
+
+The MVP supports in-app notifications only. Initial types, source severities,
+recipient rules, preference defaults, source identity, and post-commit event
+creation are defined in `docs/15-database-schema.md`. The unique notification
+identity is `(source_type, source_id, type, user_id)`; no timestamps participate
+in deduplication.
 
 ### Audit
 GET /audit-logs

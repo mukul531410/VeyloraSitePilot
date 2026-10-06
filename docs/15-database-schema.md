@@ -171,13 +171,41 @@ id, organization_id, site_id, operation_id, status, requested_by, reviewed_by, r
 
 ## Notifications
 ### notification_channels
-id, organization_id, type, config_ciphertext, enabled
+id (ULID), organization_id, type, enabled, created_at, updated_at
+
+The MVP creates one enabled `in_app` channel per organization. External delivery
+configuration is not part of the MVP.
 
 ### notification_preferences
-id, organization_id, user_id, event_type, channel_id, enabled
+id (ULID), organization_id, user_id, event_type, channel_id, enabled, created_at, updated_at
+
+Unique identity: `(organization_id, user_id, event_type, channel_id)`. A missing
+preference is enabled; a matching disabled preference suppresses delivery.
 
 ### notifications
-id, organization_id, user_id nullable, site_id nullable, type, severity, title, body, read_at, created_at
+id (ULID), organization_id, user_id, site_id nullable, source_type, source_id,
+type, severity, title, body, read_at nullable, created_at, updated_at
+
+Notifications are per-user in-app records. `source_type` and `source_id` retain
+the durable source identity; the unique identity is
+`(source_type, source_id, type, user_id)`. `user_id` uses the existing users
+table's unsigned integer key. Organization and user deletion cascade; deleting
+a site nulls `site_id`. The lifecycle is unread (`read_at = null`) to read.
+Notifications are not automatically resolved or deleted.
+
+Initial notification types are `incident_detected` (source incident severity),
+`incident_resolved` (`info`), `available_update_detected` (`info`),
+`operation_failed` (`high`), `operation_verification_failed` (`high`),
+`operation_unknown` (`high`), `approval_requested` (`info`), and
+`automation_failed` (`high`). Incident, update, operation and automation
+notifications go to every active user with active membership in the site's
+active organization. Approval requests go to active organization owners/admins
+except the requester.
+
+Source transitions publish domain events after their transaction commits. A
+queued listener resolves recipients, applies per-user `in_app` preferences and
+creates notifications idempotently. Notification delivery failure does not
+reverse or fail the committed source transition.
 
 ## Security
 ### security_findings

@@ -199,6 +199,35 @@ already cancels it. Cancellation never dispatches connector work and is audited 
 `operation_cancelled` with before/after status and `connector_dispatch_claimed:
 false`.
 
+## Phase 4 — In-app notifications
+
+The notification MVP supports only the `in_app` channel. Its types are
+`incident_detected` (incident severity), `incident_resolved` (`info`),
+`available_update_detected` (`info`), `operation_failed` (`high`),
+`operation_verification_failed` (`high`), `operation_unknown` (`high`),
+`approval_requested` (`info`), and `automation_failed` (`high`). Verification
+failure is distinct from operation execution failure.
+
+Incident, available-update, operation, and automation events target every active
+member with an active user in the active organization owning the site. Approval
+requests target active organization owners/admins other than the requester.
+Preferences are per organization, user, event type, and channel; missing means
+enabled and a matching disabled preference suppresses delivery.
+
+Notifications are one per recipient, carry `source_type` and `source_id`, and
+are unique by `(source_type, source_id, type, user_id)`. They start unread and
+become read only through the recipient's explicit read action. Source records
+retain their independent lifecycle; notifications are not auto-resolved or
+deleted. Source domain events are dispatched after commit to a queued listener;
+delivery failure cannot roll back or fail an already committed source action.
+
+`GET /api/v1/notifications` lists only the authenticated recipient's records,
+defaults to unread, supports status/type/severity/site filters, uses page-number
+pagination (default 25, maximum 100), and orders by `created_at DESC`, `id DESC`.
+`GET /api/v1/notifications/{notification}` is read-only. `POST
+/api/v1/notifications/{notification}/read` sets `read_at` once and is
+idempotent. Out-of-scope records return 404. The API uses the standard envelope.
+
 ## Status
 Architecture baseline approved for implementation.
 
