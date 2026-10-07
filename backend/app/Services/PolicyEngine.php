@@ -106,10 +106,9 @@ class PolicyEngine
 
         $capability = $connection->capabilities()
             ->where('capability_key', $operationType)
-            ->where('enabled', true)
             ->first();
 
-        return $capability !== null;
+        return $capability?->isEffective() ?? false;
     }
 
     private function checkApprovalPolicy(Site $site, string $operationType): bool

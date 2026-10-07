@@ -37,7 +37,12 @@ id, organization_id, name, url, environment, status, business_criticality, timez
 id, site_id, status, connector_version, credential_ciphertext, credential_version, connector_token_hash, connection_intent, intent_expires_at, connected_at, last_seen_at, revoked_at, created_at, updated_at
 
 ### connector_capabilities
-id, site_connection_id, capability_key, enabled, discovered_at, updated_at
+id, site_connection_id, capability_key, enabled, reported_supported nullable, reported_at nullable, discovered_at, updated_at
+
+`enabled` is the SitePilot grant. Connector-reported support is stored
+separately. A capability is effective only when both `enabled` and
+`reported_supported` are true. The unique `(site_connection_id, capability_key)`
+identity is unchanged.
 
 ### connector_heartbeats
 id, site_connection_id, connector_version, wordpress_version, php_version, reported_at, status

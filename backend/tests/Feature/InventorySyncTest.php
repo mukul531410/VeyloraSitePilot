@@ -119,6 +119,8 @@ class InventorySyncTest extends TestCase
             'site_connection_id' => SiteConnection::query()->firstOrFail()->id,
             'capability_key' => 'read.plugins',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
         $response = $this->asConnector($token)
@@ -484,6 +486,8 @@ class InventorySyncTest extends TestCase
                 'site_connection_id' => $connection->id,
                 'capability_key' => $capability,
                 'enabled' => true,
+                'reported_supported' => true,
+                'reported_at' => now(),
                 'discovered_at' => now(),
             ]);
         }

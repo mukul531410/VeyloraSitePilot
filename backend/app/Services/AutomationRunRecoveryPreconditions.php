@@ -299,10 +299,10 @@ class AutomationRunRecoveryPreconditions
             throw new AutomationRunRecoveryException(AutomationRunRecoveryException::CONNECTION_UNAVAILABLE);
         }
 
-        if (! $connection->capabilities()
+        $capability = $connection->capabilities()
             ->where('capability_key', $intent->original_operation_type)
-            ->where('enabled', true)
-            ->exists()) {
+            ->first();
+        if (! $capability?->isEffective()) {
             throw new AutomationRunRecoveryException(AutomationRunRecoveryException::CAPABILITY_NOT_GRANTED);
         }
 

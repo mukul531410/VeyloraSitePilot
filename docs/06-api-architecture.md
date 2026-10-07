@@ -71,6 +71,7 @@ Example:
 /api/v1/connector/register
 /api/v1/connector/heartbeat
 /api/v1/connector/capabilities
+/api/v1/connector/capabilities/report (signed HMAC)
 /api/v1/connector/inventory
 /api/v1/connector/telemetry
 /api/v1/connector/jobs/{job}

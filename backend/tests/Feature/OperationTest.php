@@ -57,6 +57,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => $capabilityKey,
             'enabled' => $enabled,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -1186,6 +1188,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
         $response = $this->postJson('/api/v1/sites/'.$site->id.'/operations', [
@@ -1411,6 +1415,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -1479,6 +1485,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -1560,6 +1568,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -1679,6 +1689,32 @@ class OperationTest extends TestCase
         $this->assertDatabaseCount('operation_attempts', 1);
     }
 
+    public function test_job_claim_requires_effective_cache_clear_capability(): void
+    {
+        foreach ([true, false, null] as $index => $reportedSupported) {
+            [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-effective-capability-' . $index);
+
+            if ($reportedSupported !== true) {
+                SiteConnection::where('site_id', $site->id)->firstOrFail()
+                    ->capabilities()
+                    ->where('capability_key', 'action.cache_clear')
+                    ->update(['reported_supported' => $reportedSupported]);
+            }
+
+            $response = $this->withHeaders(['Authorization' => 'Bearer ' . $token])
+                ->postJson('/api/v1/connector/jobs/'.$jobId.'/claim');
+
+            if ($reportedSupported === true) {
+                $response->assertOk();
+                $this->assertSame(OperationAttempt::STATUS_ACCEPTED, $attempt->fresh()->status);
+            } else {
+                $response->assertStatus(403)->assertJsonPath('error.code', 'capability_denied');
+                $this->assertSame(OperationAttempt::STATUS_DISPATCHED, $attempt->fresh()->status);
+                $this->assertNull($attempt->fresh()->claimed_by_connection_id);
+            }
+        }
+    }
+
     public function test_revoked_connector_cannot_claim_job(): void
     {
         [$site, $attempt, $jobId, $token] = $this->createDispatchedJob('claim-revoked-token');
@@ -1720,6 +1756,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $otherConnection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -1783,6 +1821,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
 
@@ -2134,6 +2174,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $otherConnection->id,
             'capability_key' => 'read.cache_state',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
         $this->withHeaders(['Authorization' => 'Bearer '.$sameSiteToken])->postJson('/api/v1/connector/jobs/'.$jobId.'/state', $state)->assertStatus(409);
@@ -2181,6 +2223,8 @@ class OperationTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'read.cache_state',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
     }

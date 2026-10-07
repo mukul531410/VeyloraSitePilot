@@ -17,12 +17,16 @@ class ConnectorCapability extends Model
         'site_connection_id',
         'capability_key',
         'enabled',
+        'reported_supported',
+        'reported_at',
         'discovered_at',
         'updated_at',
     ];
 
     protected $casts = [
         'enabled' => 'boolean',
+        'reported_supported' => 'boolean',
+        'reported_at' => 'datetime',
         'discovered_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
@@ -30,5 +34,10 @@ class ConnectorCapability extends Model
     public function siteConnection(): BelongsTo
     {
         return $this->belongsTo(SiteConnection::class);
+    }
+
+    public function isEffective(): bool
+    {
+        return $this->enabled === true && $this->reported_supported === true;
     }
 }

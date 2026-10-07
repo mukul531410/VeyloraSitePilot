@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Requests\ConnectorCapabilityReportRequest;
 use App\Http\Requests\ConnectorHeartbeatRequest;
 use App\Http\Requests\ConnectorRegisterRequest;
 use App\Http\Requests\ConnectorSubmitInventoryRequest;
@@ -13,6 +14,7 @@ use App\Models\Operation;
 use App\Models\OperationAttempt;
 use App\Models\OperationResult;
 use App\Models\SiteConnection;
+use App\Services\ConnectorCapabilityReportService;
 use App\Services\ConnectorCredentialLifecycle;
 use App\Services\InventorySubmissionService;
 use App\Services\MaintenanceLock;
@@ -87,8 +89,33 @@ class ConnectorController extends BaseController
                 'capability_key' => $cap->capability_key,
                 'enabled' => $cap->enabled,
                 'discovered_at' => $cap->discovered_at?->toIso8601String(),
+                'reported_supported' => $cap->reported_supported,
+                'reported_at' => $cap->reported_at?->toIso8601String(),
+                'effective' => $cap->isEffective(),
             ])->values()->all()
         );
+    }
+
+    public function reportCapabilities(
+        ConnectorCapabilityReportRequest $request,
+        ConnectorCapabilityReportService $reports,
+    ) {
+        $credential = $request->attributes->get('connector_credential');
+        $connection = SiteConnection::query()->findOrFail($credential->siteConnectionId);
+        $report = $request->report();
+
+        $connection = $reports->report(
+            $connection,
+            $report['connector_version'],
+            $report['reported_at'],
+            $report['capabilities'],
+        );
+
+        return $this->successResponse([
+            'connection_id' => $connection->id,
+            'connector_version' => $connection->connector_version,
+            'reported_at' => $report['reported_at'],
+        ]);
     }
 
     public function telemetry(ConnectorTelemetryRequest $request)
@@ -198,10 +225,9 @@ class ConnectorController extends BaseController
 
                 $capability = $connection->capabilities()
                     ->where('capability_key', 'action.cache_clear')
-                    ->where('enabled', true)
                     ->first();
 
-                if (! $capability) {
+                if (! $capability?->isEffective()) {
                     return $this->errorResponse('Capability not granted', 'capability_denied', 403);
                 }
 
@@ -449,7 +475,8 @@ class ConnectorController extends BaseController
             if (! $lockedConnection || ! $lockedConnection->isActive()) {
                 return ['error' => ['Connector is inactive or revoked', 'unauthorized', 401]];
             }
-            if (! $lockedConnection->capabilities()->where('capability_key', 'read.cache_state')->where('enabled', true)->exists()) {
+            $capability = $lockedConnection->capabilities()->where('capability_key', 'read.cache_state')->first();
+            if (! $capability?->isEffective()) {
                 return ['error' => ['Capability not granted', 'capability_denied', 403]];
             }
             $lockedAttempt = OperationAttempt::whereKey($attempt->id)->lockForUpdate()->firstOrFail();

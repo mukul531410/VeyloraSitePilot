@@ -88,12 +88,11 @@ class InventorySubmissionService
         }
 
         foreach ($required as $capability) {
-            $granted = $connection->capabilities()
+            $capabilityRow = $connection->capabilities()
                 ->where('capability_key', $capability)
-                ->where('enabled', true)
-                ->exists();
+                ->first();
 
-            if (! $granted) {
+            if (! $capabilityRow?->isEffective()) {
                 return ['error' => ['Capability not granted', 'capability_denied', 403]];
             }
         }

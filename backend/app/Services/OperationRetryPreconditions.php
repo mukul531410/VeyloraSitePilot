@@ -86,10 +86,9 @@ class OperationRetryPreconditions
 
         $capability = $connection->capabilities()
             ->where('capability_key', $operation->operation_type)
-            ->where('enabled', true)
             ->first();
 
-        if (! $capability) {
+        if (! $capability?->isEffective()) {
             return 'required_capability_unavailable';
         }
 

@@ -89,5 +89,10 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/connector/jobs/{job}/state', [ConnectorController::class, 'submitState']);
     });
 
+    Route::middleware('connector.signed')->post(
+        '/connector/capabilities/report',
+        [ConnectorController::class, 'reportCapabilities'],
+    );
+
     Route::post('/connector/register', [ConnectorController::class, 'register']);
 });

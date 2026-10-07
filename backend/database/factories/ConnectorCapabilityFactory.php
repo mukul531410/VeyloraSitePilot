@@ -21,6 +21,8 @@ class ConnectorCapabilityFactory extends Factory
                 'action.maintenance_mode',
             ]),
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ];
     }

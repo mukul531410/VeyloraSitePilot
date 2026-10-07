@@ -591,6 +591,8 @@ class AutomationRunEvaluationTest extends TestCase
                 'site_connection_id' => $connection->id,
                 'capability_key' => AutomationRule::ACTION_CACHE_CLEAR,
                 'enabled' => true,
+                'reported_supported' => true,
+                'reported_at' => now(),
                 'discovered_at' => now(),
             ]);
         }

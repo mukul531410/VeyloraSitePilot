@@ -78,6 +78,9 @@ class SiteConnectionController extends BaseController
                     'capability_key' => $cap->capability_key,
                     'enabled' => $cap->enabled,
                     'discovered_at' => $cap->discovered_at?->toIso8601String(),
+                    'reported_supported' => $cap->reported_supported,
+                    'reported_at' => $cap->reported_at?->toIso8601String(),
+                    'effective' => $cap->isEffective(),
                 ])->values()->all(),
                 'latest_heartbeat' => $latestHeartbeat
                     ? $this->transformConnectorHeartbeat($latestHeartbeat)

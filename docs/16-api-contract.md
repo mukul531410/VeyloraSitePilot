@@ -265,18 +265,34 @@ Connector endpoints use a separate authentication mechanism and scope.
 POST /connector/register
 POST /connector/heartbeat
 GET /connector/capabilities
+POST /connector/capabilities/report (signed HMAC)
 POST /connector/inventory
 POST /connector/telemetry
 POST /connector/jobs/{job}/result
 POST /connector/jobs/{job}/state
 GET /connector/jobs
 
+`GET /connector/capabilities` remains the bearer-authenticated capability
+grant/read surface. Each item exposes SitePilot's `enabled` grant,
+connector-reported `reported_supported` and `reported_at`, and the computed
+`effective` state. Effective capability requires both `enabled` and
+`reported_supported` to be true.
+
+`POST /connector/capabilities/report` requires an issued connector credential,
+HMAC signature, and replay-protected nonce. Its required body fields are
+`connector_version`, RFC3339 UTC `reported_at`, and a non-empty `capabilities`
+array of unique `{key, supported}` objects. A report updates support only; it
+never grants a capability. Unknown keys may be stored but remain ungranted,
+and a previously reported capability omitted from a later report becomes
+unsupported without deleting its SitePilot grant.
+
 `POST /connector/inventory` is implemented and closes connection lifecycle step
 "initial inventory sync". It requires an authenticated active connector and the
 documented read capability for each section it reports: `read.wordpress` always,
 `read.plugins` when `plugins` is non-empty or explicitly complete, and
-`read.themes` when `themes` is non-empty or explicitly complete. A missing or
-disabled capability is HTTP 403 `capability_denied`.
+`read.themes` when `themes` is non-empty or explicitly complete. A missing,
+disabled, unreported, or unsupported effective capability is HTTP 403
+`capability_denied`.
 
 ```
 {

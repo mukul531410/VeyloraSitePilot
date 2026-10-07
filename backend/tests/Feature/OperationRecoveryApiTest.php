@@ -296,6 +296,8 @@ class OperationRecoveryApiTest extends TestCase
             'site_connection_id' => $connection->id,
             'capability_key' => 'action.cache_clear',
             'enabled' => true,
+            'reported_supported' => true,
+            'reported_at' => now(),
             'discovered_at' => now(),
         ]);
         $source = $this->createDeadLetterSource($actor, $site);

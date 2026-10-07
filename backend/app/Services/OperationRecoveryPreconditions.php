@@ -80,11 +80,10 @@ class OperationRecoveryPreconditions
             throw new OperationRecoveryException(OperationRecoveryException::CONNECTION_UNAVAILABLE);
         }
 
-        if ($source->operation_type !== 'action.cache_clear'
-            || ! $connection->capabilities()
-                ->where('capability_key', 'action.cache_clear')
-                ->where('enabled', true)
-                ->exists()) {
+        $capability = $connection->capabilities()
+            ->where('capability_key', 'action.cache_clear')
+            ->first();
+        if ($source->operation_type !== 'action.cache_clear' || ! $capability?->isEffective()) {
             throw new OperationRecoveryException(OperationRecoveryException::CAPABILITY_NOT_GRANTED);
         }
 

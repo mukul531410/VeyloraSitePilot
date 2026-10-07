@@ -62,6 +62,14 @@ connections remain on bearer authentication until they reconnect. Credential
 rotation keeps the previous credential valid for exactly 24 hours, and nonce
 uniqueness is scoped to credential ID.
 
+Connector capability reports use issued credentials, signed HMAC requests, and
+the existing nonce replay protection. Reported support is separate from the
+SitePilot `enabled` grant. Effective capability requires both the grant and
+`reported_supported`; reports and unknown capability keys never grant
+permission. Capabilities omitted from a report become unsupported. The existing
+capability GET endpoint remains bearer-authenticated; only the new report route
+uses signed authentication in this phase.
+
 ## Authorization
 
 Use organization/site scoped permissions.

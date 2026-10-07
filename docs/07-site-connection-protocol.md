@@ -60,6 +60,22 @@ Examples:
 
 Capabilities are granted by SitePilot policy, not automatically trusted merely because the connector reports them.
 
+The connector reports support with the signed request
+`POST /api/v1/connector/capabilities/report`. It requires an issued connector
+credential, HMAC signature, timestamp, and replay-protected nonce. The request
+contains `connector_version`, an RFC3339 UTC `reported_at`, and a non-empty
+array of unique `{key, supported}` values. Syntactically valid unknown keys may
+be stored, but they are never granted automatically.
+
+`connector_capabilities.enabled` is the SitePilot grant. The nullable
+`reported_supported` is the connector's latest support report, with its
+`reported_at` timestamp. A capability is effective only when both values are
+true. A connector report never changes the SitePilot grant. A capability
+omitted from a later report becomes unsupported while its grant is retained.
+Unreported support is treated as unsupported. The bearer-authenticated
+`GET /api/v1/connector/capabilities` remains a read surface and returns
+`enabled`, `reported_supported`, `reported_at`, and `effective` separately.
+
 ## Heartbeat
 
 The connector periodically reports:

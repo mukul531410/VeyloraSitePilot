@@ -88,7 +88,7 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUniqueUntilProcessing
                 }
 
                 $capability = $this->getCapability($connection, $operation->operation_type);
-                if (! $capability || ! $capability->enabled) {
+                if (! $capability?->isEffective()) {
                     throw new RuntimeException('Capability not granted: ' . $operation->operation_type);
                 }
 
@@ -147,7 +147,6 @@ class DispatchOperationJob implements ShouldQueue, ShouldBeUniqueUntilProcessing
     {
         return $connection->capabilities()
             ->where('capability_key', $operationType)
-            ->where('enabled', true)
             ->first();
     }
 
