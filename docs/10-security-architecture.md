@@ -55,6 +55,13 @@ Never commit:
 
 Encrypt sensitive connection credentials at rest.
 
+Connector HMAC signing secrets are encrypted with Laravel `Crypt` and are only
+returned when the first credential is issued or a rotation succeeds. Existing
+bearer token hashes are never converted into signing secrets. Existing
+connections remain on bearer authentication until they reconnect. Credential
+rotation keeps the previous credential valid for exactly 24 hours, and nonce
+uniqueness is scoped to credential ID.
+
 ## Authorization
 
 Use organization/site scoped permissions.

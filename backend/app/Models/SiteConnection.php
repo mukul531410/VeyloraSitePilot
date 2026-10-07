@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\ConnectorCredentialLifecycle;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -28,6 +29,7 @@ class SiteConnection extends Model
     ];
 
     protected $casts = [
+        'credential_version' => 'integer',
         'connected_at' => 'datetime',
         'intent_expires_at' => 'datetime',
         'last_seen_at' => 'datetime',
@@ -53,6 +55,11 @@ class SiteConnection extends Model
     public function heartbeats(): HasMany
     {
         return $this->hasMany(ConnectorHeartbeat::class);
+    }
+
+    public function connectorCredentials(): HasMany
+    {
+        return $this->hasMany(ConnectorCredential::class);
     }
 
     public function isActive(): bool
@@ -107,12 +114,7 @@ class SiteConnection extends Model
 
     public function revoke(): void
     {
-        $this->update([
-            'status' => 'revoked',
-            'revoked_at' => now(),
-            'credential_ciphertext' => null,
-            'credential_version' => $this->credential_version + 1,
-        ]);
+        app(ConnectorCredentialLifecycle::class)->revokeConnection($this);
     }
 
     public function encryptCredentials(string $plaintext): void

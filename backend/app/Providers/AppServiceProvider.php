@@ -17,7 +17,7 @@ use App\Observers\AvailableUpdateObserver;
 use App\Observers\IncidentObserver;
 use App\Observers\OperationObserver;
 use App\Observers\OperationResultObserver;
-use App\Services\UnconfiguredConnectorCredentialResolver;
+use App\Services\DatabaseConnectorCredentialResolver;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;
 
@@ -25,7 +25,7 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->app->bind(ConnectorCredentialResolver::class, UnconfiguredConnectorCredentialResolver::class);
+        $this->app->bind(ConnectorCredentialResolver::class, DatabaseConnectorCredentialResolver::class);
     }
 
     public function boot(): void

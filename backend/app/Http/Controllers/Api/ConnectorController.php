@@ -13,6 +13,7 @@ use App\Models\Operation;
 use App\Models\OperationAttempt;
 use App\Models\OperationResult;
 use App\Models\SiteConnection;
+use App\Services\ConnectorCredentialLifecycle;
 use App\Services\InventorySubmissionService;
 use App\Services\MaintenanceLock;
 use Illuminate\Http\Request;
@@ -22,23 +23,30 @@ use Throwable;
 
 class ConnectorController extends BaseController
 {
+    public function __construct(private ConnectorCredentialLifecycle $credentials) {}
+
     public function register(ConnectorRegisterRequest $request)
     {
-        $connection = SiteConnection::where('connection_intent', $request->input('intent'))
-            ->where('status', 'pending')
-            ->first();
+        return DB::transaction(function () use ($request) {
+            $connection = SiteConnection::query()
+                ->where('connection_intent', $request->input('intent'))
+                ->where('status', 'pending')
+                ->lockForUpdate()
+                ->first();
 
-        if (! $connection || ! $connection->consumeIntent($request->input('intent'))) {
-            return $this->errorResponse('Invalid or expired connection intent.', 'unauthorized', 401);
-        }
+            if (! $connection || ! $connection->consumeIntent($request->input('intent'))) {
+                return $this->errorResponse('Invalid or expired connection intent.', 'unauthorized', 401);
+            }
 
-        return DB::transaction(function () use ($connection, $request) {
             $token = $connection->activate($request->input('connector_version'));
+            $issued = $this->credentials->issueInitial($connection->refresh());
 
             return $this->successResponse([
                 'connection_id' => $connection->id,
                 'status' => $connection->status,
                 'token' => $token,
+                'credential_id' => $issued['credential']->id,
+                'credential_secret' => $issued['secret'],
             ], [], 201);
         });
     }

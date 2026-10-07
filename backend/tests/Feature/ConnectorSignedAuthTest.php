@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Contracts\ConnectorCredentialResolver;
 use App\Data\ConnectorCredential;
+use App\Models\ConnectorCredential as StoredCredential;
 use App\Models\Organization;
 use App\Models\Site;
 use App\Models\SiteConnection;
@@ -11,6 +12,7 @@ use App\Services\ConnectorHmacVerifier;
 use App\Services\ConnectorRequestCanonicalizer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Str;
@@ -33,12 +35,13 @@ class ConnectorSignedAuthTest extends TestCase
         $organization = Organization::factory()->create();
         $site = Site::factory()->create(['organization_id' => $organization->id]);
         $this->scopeId = SiteConnection::factory()->create(['site_id' => $site->id])->id;
+        $this->persistCredential($this->credentialId, $this->scopeId, $this->secret);
 
         Route::middleware('connector.signed')->get('/api/v1/_test/connector/signed', fn () => response()->json(['reached' => true]));
         Route::middleware('connector.signed')->get('/api/v1/_test/connector/other', fn () => response()->json(['reached' => true]));
         Route::middleware('connector.signed')->post('/api/v1/_test/connector/signed', fn () => response()->json(['reached' => true]));
 
-        $credential = new ConnectorCredential($this->credentialId, $this->scopeId, $this->secret);
+        $credential = new ConnectorCredential($this->credentialId, $this->credentialId, $this->secret, $this->scopeId);
         app()->instance(ConnectorCredentialResolver::class, new class($credential) implements ConnectorCredentialResolver
         {
             public function __construct(private ConnectorCredential $credential) {}
@@ -59,7 +62,7 @@ class ConnectorSignedAuthTest extends TestCase
 
         $this->get('/api/v1/_test/connector/signed?ignored=1', $headers)->assertOk()->assertJson(['reached' => true]);
         $this->assertDatabaseHas('connector_request_nonces', [
-            'site_connection_id' => $this->scopeId,
+            'credential_id' => $this->credentialId,
             'nonce_hash' => hash('sha256', $nonce),
         ]);
     }
@@ -108,6 +111,7 @@ class ConnectorSignedAuthTest extends TestCase
 
     public function test_timestamp_expiry_future_and_inclusive_boundary(): void
     {
+        $this->travelTo(now()->startOfSecond());
         $now = now()->timestamp;
         $this->get('/api/v1/_test/connector/signed', $this->signedHeaders('GET', '/api/v1/_test/connector/signed', '', $this->nonce(), (string) ($now - 301)))
             ->assertUnauthorized()->assertJsonPath('error.code', 'connector_timestamp_expired');
@@ -119,16 +123,16 @@ class ConnectorSignedAuthTest extends TestCase
             ->assertOk();
     }
 
-    public function test_duplicate_nonce_is_rejected_but_same_nonce_in_another_connection_scope_is_allowed(): void
+    public function test_duplicate_nonce_is_rejected_but_same_nonce_in_another_credential_scope_is_allowed(): void
     {
         $nonce = $this->nonce();
         $headers = $this->signedHeaders('GET', '/api/v1/_test/connector/signed', '', $nonce);
         $this->get('/api/v1/_test/connector/signed', $headers)->assertOk();
         $this->get('/api/v1/_test/connector/signed', $headers)->assertStatus(409)->assertJsonPath('error.code', 'connector_request_replayed');
 
-        $organization = Organization::factory()->create();
-        $site = Site::factory()->create(['organization_id' => $organization->id]);
-        $otherCredential = new ConnectorCredential((string) Str::ulid(), SiteConnection::factory()->create(['site_id' => $site->id])->id, $this->secret);
+        $otherCredentialId = (string) Str::ulid();
+        $otherCredential = new ConnectorCredential($otherCredentialId, $otherCredentialId, $this->secret, $this->scopeId);
+        $this->persistCredential($otherCredentialId, $this->scopeId, $this->secret);
         app()->instance(ConnectorCredentialResolver::class, new class($otherCredential) implements ConnectorCredentialResolver
         {
             public function __construct(private ConnectorCredential $credential) {}
@@ -146,7 +150,7 @@ class ConnectorSignedAuthTest extends TestCase
     {
         $nonce = $this->nonce();
         DB::table('connector_request_nonces')->insert([
-            'site_connection_id' => $this->scopeId,
+            'credential_id' => $this->credentialId,
             'nonce_hash' => hash('sha256', $nonce),
             'expires_at' => now()->subSecond(),
             'created_at' => now()->subMinutes(11),
@@ -182,5 +186,17 @@ class ConnectorSignedAuthTest extends TestCase
     private function nonce(): string
     {
         return rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
+    }
+
+    private function persistCredential(string $id, string $connectionId, string $secret): void
+    {
+        StoredCredential::query()->forceCreate([
+            'id' => $id,
+            'site_connection_id' => $connectionId,
+            'secret_ciphertext' => Crypt::encryptString($secret),
+            'version' => random_int(1, 100000),
+            'status' => StoredCredential::STATUS_PRIMARY,
+            'issued_at' => now(),
+        ]);
     }
 }

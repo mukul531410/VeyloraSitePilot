@@ -17,6 +17,16 @@ Create a secure, revocable relationship between one SitePilot site record and on
 9. Initial inventory sync runs.
 10. Connection becomes active only after verification.
 
+The current bearer registration exchange also issues the first HMAC credential.
+Its `credential_secret` is the standard Base64 representation of 32 random
+bytes and is returned only in that registration response. The corresponding
+secret is stored encrypted with Laravel's application encryption key. HMAC
+credentials use `primary`, `overlap`, and `revoked` lifecycle statuses. Rotation
+makes the new version primary immediately and keeps the prior version valid for
+24 hours. Nonces are unique per credential. Existing bearer-only connections
+are not backfilled; they continue to use bearer authentication and must reconnect
+through a new connection intent to receive an HMAC credential.
+
 ## Security requirements
 
 - one-time connection codes must expire;

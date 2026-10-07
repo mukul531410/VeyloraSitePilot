@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\ConnectorCapability;
+use App\Models\ConnectorCredential;
 use App\Models\ConnectorHeartbeat;
 use App\Models\Organization;
 use App\Models\OrganizationMember;
@@ -11,7 +12,8 @@ use App\Models\Site;
 use App\Models\SiteConnection;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -220,7 +222,7 @@ class SiteConnectionTest extends TestCase
 
         $response->assertStatus(201)
             ->assertJsonStructure([
-                'data' => ['connection_id', 'status', 'token'],
+                'data' => ['connection_id', 'status', 'token', 'credential_id', 'credential_secret'],
                 'meta',
                 'request_id',
             ])
@@ -231,6 +233,16 @@ class SiteConnectionTest extends TestCase
             ]);
 
         $this->assertNotNull($response->json('data.token'));
+        $this->assertSame(44, strlen($response->json('data.credential_secret')));
+        $this->assertDatabaseHas('connector_credentials', [
+            'id' => $response->json('data.credential_id'),
+            'site_connection_id' => $response->json('data.connection_id'),
+            'version' => 1,
+            'status' => 'primary',
+        ]);
+        $stored = ConnectorCredential::query()->findOrFail($response->json('data.credential_id'));
+        $this->assertStringNotContainsString($response->json('data.credential_secret'), $stored->secret_ciphertext);
+        $this->assertSame(base64_decode($response->json('data.credential_secret')), Crypt::decryptString($stored->secret_ciphertext));
         $this->assertDatabaseHas('site_connections', [
             'connection_intent' => null,
         ]);
@@ -265,6 +277,7 @@ class SiteConnectionTest extends TestCase
         ]);
 
         $response->assertStatus(401);
+        $this->assertDatabaseCount('connector_credentials', 1);
     }
 
     public function test_connector_heartbeat_requires_valid_token(): void
