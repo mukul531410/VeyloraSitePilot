@@ -5,8 +5,8 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('admin@example.com');
-  const [password, setPassword] = useState('password');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const { login, error } = useAuth();
   const router = useRouter();
@@ -34,8 +34,12 @@ export default function LoginPage() {
         <p className="text-center text-sm text-gray-500">Sign in to your account</p>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">Email</label>
+          <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+            Email
+          </label>
           <input
+            id="email"
+            name="email"
             type="email"
             autoComplete="email"
             value={email}
@@ -46,8 +50,12 @@ export default function LoginPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">Password</label>
+          <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+            Password
+          </label>
           <input
+            id="password"
+            name="password"
             type="password"
             autoComplete="current-password"
             value={password}

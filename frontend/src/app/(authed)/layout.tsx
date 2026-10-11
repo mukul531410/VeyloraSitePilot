@@ -24,6 +24,11 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
     );
   }
 
+  const activeHref = navItems
+    .map((item) => item.href)
+    .filter((href) => pathname === href || pathname.startsWith(`${href}/`))
+    .sort((a, b) => b.length - a.length)[0];
+
   return (
     <div className="min-h-screen bg-gray-100">
       <nav className="bg-white shadow">
@@ -39,7 +44,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
                     key={item.href}
                     href={item.href}
                     className={`${
-                      pathname.startsWith(item.href)
+                      item.href === activeHref
                         ? 'border-blue-500 text-gray-900'
                         : 'border-transparent text-gray-500 hover:border-gray-300'
                     } inline-flex items-center px-1 border-b-2 text-sm font-medium`}
@@ -70,7 +75,11 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
 }
 
 const navItems = [
+  { name: 'Overview', href: '/dashboard/overview' },
   { name: 'Dashboard', href: '/dashboard' },
   { name: 'Sites', href: '/sites' },
+  { name: 'Connections', href: '/connections' },
+  { name: 'Approvals', href: '/approvals' },
+  { name: 'Activity', href: '/activity' },
   { name: 'Organizations', href: '/organizations' },
 ];

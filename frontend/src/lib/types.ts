@@ -69,6 +69,9 @@ export interface ConnectorCapabilitySummary {
   capability_key: string;
   enabled: boolean;
   discovered_at: string | null;
+  reported_supported: boolean;
+  reported_at: string | null;
+  effective: boolean;
 }
 
 export interface ConnectorHeartbeat {
@@ -84,6 +87,144 @@ export interface ConnectorHeartbeat {
 export interface ConnectionIntent {
   connection_intent: string;
   intent_expires_at: string;
+}
+
+export interface NotificationItem {
+  id: string;
+  organization_id: string | null;
+  site_id: string | null;
+  source_type: string;
+  source_id: string;
+  type: string;
+  severity: string;
+  title: string;
+  body: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface ApprovalItem {
+  id: string;
+  organization_id: string;
+  site_id: string;
+  operation_id: string;
+  status: 'pending' | 'approved' | 'rejected' | 'expired';
+  requested_by: string;
+  reviewed_by: string | null;
+  reason: string | null;
+  expires_at: string;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  site: { id: string; name: string } | null;
+  operation: { id: string; operation_type: string; status: string } | null;
+}
+
+export interface AuditLogItem {
+  id: string;
+  organization_id: string;
+  site_id: string | null;
+  user_id: string | number | null;
+  action: string;
+  target_type: string;
+  target_id: string;
+  correlation_id: string;
+  policy_result: string | null;
+  created_at: string;
+  user: { id: string | number; name: string } | null;
+  site: { id: string; name: string } | null;
+}
+
+/**
+ * Operation statuses written by the backend (`Operation` model constants).
+ * `unknown` means the execution outcome is uncertain; only authoritative
+ * remote verification can ever set `succeeded`.
+ */
+export type OperationStatus =
+  | 'requested'
+  | 'pending_approval'
+  | 'approved'
+  | 'queued'
+  | 'running'
+  | 'verification_pending'
+  | 'succeeded'
+  | 'failed'
+  | 'unknown'
+  | 'cancelled'
+  | 'dead_letter';
+
+/** Mirrors `Operation::TERMINAL_STATUSES`. */
+export const OPERATION_TERMINAL_STATUSES: OperationStatus[] = [
+  'succeeded',
+  'failed',
+  'unknown',
+  'cancelled',
+  'dead_letter',
+];
+
+/** Only these pre-flight states are legal to cancel (backend rejects the rest with 409). */
+export const CANCELLABLE_STATUSES: OperationStatus[] = ['requested', 'approved', 'queued'];
+
+/** Only `action.cache_clear` is accepted by `StoreOperationRequest`. */
+export const SUPPORTED_OPERATION_TYPES = ['action.cache_clear'] as const;
+
+/**
+ * `transformOperation()` projects each relation with `->only([...])`, so these
+ * nested objects carry no `id` and no connector credentials.
+ */
+export interface OperationAttemptSummary {
+  attempt_number: number;
+  status: string;
+  connector_job_id: string | null;
+  retryable: boolean | null;
+  timeout_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_code: string | null;
+}
+
+export interface OperationResultSummary {
+  result_status: string | null;
+  cache_cleared_at: string | null;
+  cleared_types: string[] | null;
+  cache_generation: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  verification_status: string | null;
+  verification_error: string | null;
+  verified_at: string | null;
+}
+
+export interface OperationApprovalSummary {
+  status: string;
+  requested_by: string | number;
+  reviewed_by: string | number | null;
+  reason: string | null;
+  expires_at: string | null;
+  reviewed_at: string | null;
+}
+
+export interface OperationItem {
+  id: string;
+  site_id: string;
+  operation_type: string;
+  target_json: Record<string, unknown> | null;
+  status: OperationStatus;
+  policy_result: string | null;
+  approval_required: boolean;
+  idempotency_key: string;
+  requested_by: string | number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  resolution: string | null;
+  resolved_at: string | null;
+  resolved_by: string | number | null;
+  resolution_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  latest_attempt?: OperationAttemptSummary | null;
+  result?: OperationResultSummary | null;
+  approval?: OperationApprovalSummary | null;
 }
 
 export interface LoginCredentials {

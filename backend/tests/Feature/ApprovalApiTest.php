@@ -155,6 +155,114 @@ class ApprovalApiTest extends TestCase
             ->assertJsonPath('error.code', 'not_found');
     }
 
+    public function test_approval_list_requires_authentication(): void
+    {
+        $this->getJson('/api/v1/approvals')->assertUnauthorized();
+    }
+
+    public function test_owner_lists_only_their_organization_approvals_with_filters_and_validation(): void
+    {
+        [$owner, $organization, $site] = $this->makeMember('owner');
+        $requester = User::factory()->create();
+        $requesterRole = Role::factory()->create(['organization_id' => $organization->id, 'key' => 'operation-requester']);
+        OrganizationMember::create([
+            'organization_id' => $organization->id,
+            'user_id' => $requester->id,
+            'role_id' => $requesterRole->id,
+            'status' => 'active',
+        ]);
+
+        $pending = $this->createApprovalFor($organization, $site, $requester, ApprovalRequest::STATUS_PENDING);
+        $approved = $this->createApprovalFor($organization, $site, $requester, ApprovalRequest::STATUS_APPROVED);
+
+        // A different tenant's approval must never leak into this list.
+        $this->makeApproval('owner');
+
+        Sanctum::actingAs($owner);
+
+        $response = $this->withHeader('X-Request-ID', 'approvals-list')
+            ->getJson('/api/v1/approvals')
+            ->assertOk()
+            ->assertJsonPath('request_id', 'approvals-list')
+            ->assertJsonPath('meta.total', 2);
+
+        $actualIds = collect($response->json('data'))->pluck('id')->sort()->values()->all();
+        $expectedIds = collect([$pending->id, $approved->id])->sort()->values()->all();
+        $this->assertSame($expectedIds, $actualIds);
+
+        $this->getJson('/api/v1/approvals?status=pending')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.id', $pending->id)
+            ->assertJsonPath('data.0.status', ApprovalRequest::STATUS_PENDING)
+            ->assertJsonPath('data.0.site.id', $site->id)
+            ->assertJsonPath('data.0.operation.operation_type', 'action.cache_clear');
+
+        $this->getJson('/api/v1/approvals?status=approved')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 1)
+            ->assertJsonPath('data.0.id', $approved->id);
+
+        $this->getJson('/api/v1/approvals?site_id='.$site->id)
+            ->assertOk()
+            ->assertJsonPath('meta.total', 2);
+
+        $this->getJson('/api/v1/approvals?per_page=1')
+            ->assertOk()
+            ->assertJsonPath('meta.per_page', 1)
+            ->assertJsonPath('meta.total', 2);
+
+        $this->getJson('/api/v1/approvals?status=bogus')
+            ->assertStatus(422)
+            ->assertJsonPath('error.code', 'validation_error');
+    }
+
+    public function test_inactive_tenant_resources_are_excluded_from_the_approval_list(): void
+    {
+        [$approval, $reviewer, $organization, $site, $membership] = $this->makeApproval('owner');
+        Sanctum::actingAs($reviewer);
+
+        $this->getJson('/api/v1/approvals')->assertOk()->assertJsonPath('meta.total', 1);
+
+        $site->update(['status' => 'inactive']);
+        $this->getJson('/api/v1/approvals')->assertOk()->assertJsonPath('meta.total', 0);
+
+        $site->update(['status' => 'active']);
+        $membership->update(['status' => 'revoked']);
+        $this->getJson('/api/v1/approvals')->assertOk()->assertJsonPath('meta.total', 0);
+
+        $membership->update(['status' => 'active']);
+        $organization->update(['status' => 'suspended']);
+        $this->getJson('/api/v1/approvals')->assertOk()->assertJsonPath('meta.total', 0);
+
+        $this->assertNotNull($approval->id);
+    }
+
+    private function createApprovalFor(Organization $organization, Site $site, User $requester, string $status): ApprovalRequest
+    {
+        $operation = Operation::create([
+            'site_id' => $site->id,
+            'operation_type' => 'action.cache_clear',
+            'target_json' => ['cache_type' => 'wordpress'],
+            'status' => $status === ApprovalRequest::STATUS_PENDING
+                ? Operation::STATUS_PENDING_APPROVAL
+                : Operation::STATUS_APPROVED,
+            'approval_required' => true,
+            'idempotency_key' => 'approval-'.str()->ulid(),
+            'requested_by' => $requester->id,
+        ]);
+
+        return ApprovalRequest::create([
+            'organization_id' => $organization->id,
+            'site_id' => $site->id,
+            'operation_id' => $operation->id,
+            'status' => $status,
+            'requested_by' => $requester->id,
+            'reason' => 'Operation requires review',
+            'expires_at' => now()->addDay(),
+        ]);
+    }
+
     private function makeApproval(string $reviewerRole = 'owner'): array
     {
         [$reviewer, $organization, $site, $membership] = $this->makeMember($reviewerRole);

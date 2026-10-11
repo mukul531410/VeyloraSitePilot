@@ -1,4 +1,4 @@
-import { SiteConnection, SiteHealth, SiteMetricsResponse, Incident } from './types';
+import { ApprovalItem, AuditLogItem, NotificationItem, OperationItem, SiteConnection, SiteConnectionMeta, SiteHealth, SiteMetricsResponse, Incident } from './types';
 
 export class ApiError extends Error {
   public statusCode: number;
@@ -102,8 +102,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  getSites: (): Promise<ApiResponse<unknown[]>> =>
-    request('/sites', { method: 'GET' }),
+  getSites: (params?: { page?: number }): Promise<ApiResponse<unknown[]>> => {
+    const qs = new URLSearchParams();
+    if (params?.page) qs.append('page', String(params.page));
+    const query = qs.toString();
+    return request(`/sites${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
 
   createSite: (data: {
     organization_id: string;
@@ -138,7 +142,10 @@ export const api = {
       body: JSON.stringify(data || {}),
     }),
 
-  getConnection: (siteId: string, connectionId: string): Promise<ApiResponse<SiteConnection>> =>
+  getConnection: (
+    siteId: string,
+    connectionId: string,
+  ): Promise<ApiResponse<SiteConnection> & { meta: SiteConnectionMeta }> =>
     request(`/sites/${siteId}/connections/${connectionId}`, { method: 'GET' }),
 
   revokeConnection: (siteId: string, connectionId: string): Promise<ApiResponse<null>> =>
@@ -160,4 +167,84 @@ export const api = {
     const query = qs.toString();
     return request(`/sites/${siteId}/incidents${query ? `?${query}` : ''}`, { method: 'GET' });
   },
+
+  getUnreadNotifications: (params?: {
+    per_page?: number;
+  }): Promise<ApiResponse<NotificationItem[]>> => {
+    const qs = new URLSearchParams({ status: 'unread' });
+    if (params?.per_page) qs.append('per_page', String(params.per_page));
+    return request(`/notifications?${qs.toString()}`, { method: 'GET' });
+  },
+
+  markNotificationRead: (id: string): Promise<ApiResponse<NotificationItem>> =>
+    request(`/notifications/${id}/read`, {
+      method: 'POST',
+    }),
+
+  getApprovals: (params?: {
+    status?: string;
+    site_id?: string;
+    per_page?: number;
+    page?: number;
+  }): Promise<ApiResponse<ApprovalItem[]>> => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.append('status', params.status);
+    if (params?.site_id) qs.append('site_id', params.site_id);
+    if (params?.per_page) qs.append('per_page', String(params.per_page));
+    if (params?.page) qs.append('page', String(params.page));
+    const query = qs.toString();
+    return request(`/approvals${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+
+  getAuditLogs: (params?: {
+    action?: string;
+    target_type?: string;
+    site_id?: string;
+    user_id?: string;
+    per_page?: number;
+    page?: number;
+  }): Promise<ApiResponse<AuditLogItem[]>> => {
+    const qs = new URLSearchParams();
+    if (params?.action) qs.append('action', params.action);
+    if (params?.target_type) qs.append('target_type', params.target_type);
+    if (params?.site_id) qs.append('site_id', params.site_id);
+    if (params?.user_id) qs.append('user_id', params.user_id);
+    if (params?.per_page) qs.append('per_page', String(params.per_page));
+    if (params?.page) qs.append('page', String(params.page));
+    const query = qs.toString();
+    return request(`/audit-logs${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+
+  getOperations: (params?: {
+    site_id?: string;
+    status?: string;
+    per_page?: number;
+    page?: number;
+  }): Promise<ApiResponse<OperationItem[]>> => {
+    const qs = new URLSearchParams();
+    if (params?.site_id) qs.append('site_id', params.site_id);
+    if (params?.status) qs.append('status', params.status);
+    if (params?.per_page) qs.append('per_page', String(params.per_page));
+    if (params?.page) qs.append('page', String(params.page));
+    const query = qs.toString();
+    return request(`/operations${query ? `?${query}` : ''}`, { method: 'GET' });
+  },
+
+  getOperation: (operationId: string): Promise<ApiResponse<OperationItem>> =>
+    request(`/operations/${operationId}`, { method: 'GET' }),
+
+  createOperation: (
+    siteId: string,
+    data: { operation_type: string; target_json: Record<string, unknown>; idempotency_key: string },
+  ): Promise<ApiResponse<OperationItem>> =>
+    request(`/sites/${siteId}/operations`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  cancelOperation: (operationId: string, reason: string): Promise<ApiResponse<OperationItem>> =>
+    request(`/operations/${operationId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
 };
